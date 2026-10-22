@@ -6,7 +6,7 @@ from typing import Any
 from .map_schema import build_hardware_map
 from .observations import load_observation_fixture
 from .permissions import ProbePermissions
-from .transport import SerialProtocolTransport
+from .transport import Heartbeat, SerialProtocolTransport, settle_timeout_s
 
 
 class ProbeSessionError(RuntimeError):
@@ -45,29 +45,61 @@ def run_bounded_probe(
     channels: list[int],
     arm_token: str,
     cutoff_confirmed: bool,
+    slew_us_s: int = 250,
 ) -> list[dict[str, Any]]:
     permissions.validate()
+    for channel in channels:
+        if channel not in permissions.channels:
+            raise ProbeSessionError(f"channel {channel} lacks explicit permission")
     events: list[dict[str, Any]] = []
     armed = False
+    heartbeat: Heartbeat | None = None
     try:
         hello = transport.hello()
         events.append({"event": "hello", "response": hello})
+        # v0.2 firmware: hand the approved band to the controller as well, so
+        # the firmware rejects anything outside it even if the host misbehaves.
+        settle = transport.has_caps("status")
+        if transport.has_caps("limit"):
+            for channel in channels:
+                permission = permissions.channels[channel]
+                response = transport.limit(channel, permission.min_us, permission.neutral_us, permission.max_us, slew_us_s)
+                events.append({"event": "limit", "channel": channel, "response": response})
         transport.arm(arm_token, cutoff_confirmed=cutoff_confirmed)
         armed = True
-        for channel in channels:
-            permission = permissions.channels.get(channel)
-            if permission is None:
-                raise ProbeSessionError(f"channel {channel} lacks explicit permission")
-            target = permission.target_us(1)
+        heartbeat = Heartbeat.for_transport(transport)
+        if heartbeat is not None:
+            heartbeat.start()
+
+        def move(channel: int, target: int, event: str, start: int) -> None:
             response = transport.move_us(channel, target)
-            events.append({"event": "move", "channel": channel, "target_us": target, "response": response})
-            neutral = transport.move_us(channel, permission.neutral_us)
-            events.append({"event": "return_to_approved_neutral", "channel": channel, "target_us": permission.neutral_us, "response": neutral})
+            row: dict[str, Any] = {"event": event, "channel": channel, "target_us": target, "response": response}
+            if settle:
+                state = transport.wait_settled(channel, target, timeout_s=settle_timeout_s(target - start, slew_us_s))
+                row["settled_us"] = state["current_us"]
+            events.append(row)
+            if heartbeat is not None:
+                heartbeat.check()
+
+        for channel in channels:
+            permission = permissions.channels[channel]
+            if transport.has_caps("start"):
+                # The first pulse is the approved neutral from the permission file,
+                # never a firmware default.
+                response = transport.start(channel, permission.neutral_us)
+                events.append({"event": "start", "channel": channel, "pulse_us": permission.neutral_us, "response": response})
+            target = permission.target_us(1)
+            move(channel, target, "move", permission.neutral_us)
+            move(channel, permission.neutral_us, "return_to_approved_neutral", target)
+        if heartbeat is not None:
+            heartbeat.stop()
         transport.disarm()
         armed = False
         events.append({"event": "disarm"})
         return events
-    except Exception:
+    except BaseException:
+        if heartbeat is not None:
+            heartbeat.stop()
         if armed:
             try:
                 transport.stop()

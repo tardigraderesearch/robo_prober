@@ -4,6 +4,7 @@ import argparse
 import json
 import sys
 import threading
+from contextlib import contextmanager
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -15,7 +16,13 @@ from .identity import chip_profile_id, identify_esp32_with_consent, matching_boa
 from .map_schema import export_atomic, load_map
 from .permissions import load_permissions
 from .session import build_map_from_session, run_bounded_probe
-from .transport import PtyReferenceEmulator, SerialProtocolTransport
+from .transport import (
+    InProcessEmulatorConnection,
+    PtyReferenceEmulator,
+    SerialProtocolTransport,
+    pty_available,
+    serve_forever,
+)
 
 
 def load_json(path: Path) -> Any:
@@ -98,6 +105,7 @@ def cmd_probe(args: argparse.Namespace) -> int:
             channels=channels,
             arm_token=args.arm_token,
             cutoff_confirmed=args.power_cutoff_confirmed,
+            slew_us_s=args.slew_us_s,
         )
     hardware_map = build_map_from_session(
         controller_identity=controller_identity,
@@ -134,12 +142,28 @@ def demo_confirmations() -> list[dict[str, Any]]:
     ]
 
 
-def _serve_emulator(emulator: PtyReferenceEmulator) -> None:
-    while emulator.master_fd is not None:
+@contextmanager
+def emulator_transport(timeout_s: float = 1.0):
+    """Open a transport to the built-in ROBOPROBE/1 emulator.
+
+    Uses a real pseudo terminal on Linux and macOS (exercising the serial
+    stack) and an in-process connection on Windows.
+    """
+    if pty_available():
+        emulator = PtyReferenceEmulator()
+        port = emulator.open()
+        thread = threading.Thread(target=serve_forever, args=(emulator,), daemon=True)
+        thread.start()
         try:
-            emulator.serve_once(timeout_s=0.1)
-        except OSError:
-            return
+            with SerialProtocolTransport(port, timeout_s=timeout_s) as transport:
+                yield transport, port
+        finally:
+            emulator.close()
+            thread.join(timeout=1.0)
+    else:
+        port = "emulator://in-process"
+        with SerialProtocolTransport(port, timeout_s=timeout_s, connection=InProcessEmulatorConnection()) as transport:
+            yield transport, port
 
 
 def demo_fixture_path() -> Path:
@@ -149,32 +173,25 @@ def demo_fixture_path() -> Path:
 
 def cmd_run_demo(args: argparse.Namespace) -> int:
     fixture = args.fixture or demo_fixture_path()
-    emulator = PtyReferenceEmulator()
-    port = emulator.open()
-    thread = threading.Thread(target=_serve_emulator, args=(emulator,), daemon=True)
-    thread.start()
-    permissions_data = demo_permissions()
-    permissions_data["controller_node_id"] = "usb:" + port
-    permissions = load_permissions(permissions_data)
-    controller_identity = {
-        "status": "simulated_reference_protocol",
-        "port": port,
-        "chip": "ESP32",
-        "board_selection": permissions.board_profile_id,
-        "physical_compatibility": "not verified",
-    }
-    try:
-        with SerialProtocolTransport(port, timeout_s=1.0) as transport:
-            events = run_bounded_probe(
-                transport=transport,
-                permissions=permissions,
-                channels=[0, 1, 2],
-                arm_token="demo-arm",
-                cutoff_confirmed=True,
-            )
-    finally:
-        emulator.close()
-        thread.join(timeout=1.0)
+    with emulator_transport() as (transport, port):
+        permissions_data = demo_permissions()
+        permissions_data["controller_node_id"] = "usb:" + port
+        permissions = load_permissions(permissions_data)
+        controller_identity = {
+            "status": "simulated_reference_protocol",
+            "port": port,
+            "chip": "ESP32",
+            "board_selection": permissions.board_profile_id,
+            "physical_compatibility": "not verified",
+        }
+        events = run_bounded_probe(
+            transport=transport,
+            permissions=permissions,
+            channels=[0, 1, 2],
+            arm_token="demo-arm",
+            cutoff_confirmed=True,
+            slew_us_s=1000,
+        )
     hardware_map = build_map_from_session(
         controller_identity=controller_identity,
         permissions=permissions,
@@ -195,6 +212,88 @@ def cmd_run_demo(args: argparse.Namespace) -> int:
 def cmd_validate_map(args: argparse.Namespace) -> int:
     data = load_map(args.map)
     print_json({"status": "valid", "map": str(args.map), "joints": sorted(data["joints"])})
+    return 0
+
+
+def cmd_rom(args: argparse.Namespace) -> int:
+    """Record a range of motion measured elsewhere; optionally push it to the firmware."""
+    from .api import connect
+    from .rom import get_rom, rom_range, set_rom
+
+    if args.port and args.emulator:
+        raise SystemExit("pass at most one of --port or --emulator")
+    hardware_map = load_map(args.map)
+    out = args.out or args.map
+    if out != args.map and out.exists() and not args.overwrite:
+        raise FileExistsError(f"{out} exists; pass --overwrite to replace it")
+    low, high = rom_range(args.rom1, args.rom2)
+    updated = set_rom(hardware_map, args.channel, args.rom1, args.rom2, set_by=args.operator)
+    pushed = None
+    if args.port or args.emulator:
+        joint = next(values for values in updated["joints"].values() if int(values["channel"]) == args.channel)
+        neutral = min(max(int(joint["neutral_us"]), low), high)
+        with connect(args.port, emulator=args.emulator) as controller:
+            pushed = controller.set_limits(args.channel, low, high, neutral_us=neutral, slew_us_s=args.slew_us_s)
+    export_atomic(updated, out, overwrite=True)
+    print_json({"status": "rom_saved", "out": str(out), "channel": args.channel, "rom": get_rom(updated, args.channel),
+                "firmware_limit": pushed})
+    return 0
+
+
+def cmd_rom_gui(args: argparse.Namespace) -> int:
+    try:
+        import tkinter
+    except ImportError:
+        from .platform_utils import tkinter_fix_hint
+
+        print("tkinter is not available, so the window cannot open.\n" + tkinter_fix_hint(), file=sys.stderr)
+        print("The scripting path still works: robo-prober rom --map ... --channel N --rom1 US --rom2 US",
+              file=sys.stderr)
+        return 3
+    from .rom_gui import run
+
+    try:
+        return run(map_path=args.map, out_path=args.out, port="emulator" if args.emulator else args.port,
+                   channels=args.channels, operator=args.operator or "", band_half_us=args.band_us,
+                   host_slew_us_s=args.slew_us_s)
+    except tkinter.TclError as exc:
+        print(f"Could not open a window: {exc}\nRun this from a desktop session, or script it with "
+              "'robo-prober rom'.", file=sys.stderr)
+        return 3
+
+
+def cmd_doctor(args: argparse.Namespace) -> int:
+    """Report what this installation can do."""
+    import importlib.util
+    import platform
+
+    print(f"robo-prober {__version__} on Python {platform.python_version()} ({sys.platform})")
+    ok = True
+    for module, why, required in (("serial", "serial ports", True), ("PIL", "window theme", True),
+                                  ("tkinter", "range-of-motion window", False),
+                                  ("esptool", "identify", False), ("cv2", "vision commands", False),
+                                  ("trimesh", "model commands", False)):
+        found = importlib.util.find_spec(module) is not None
+        ok = ok and (found or not required)
+        print(f"  {'ok' if found else '--'}  {module:<8} {why}{'' if found or not required else ' (REQUIRED)'}")
+    try:
+        ports = [port.device for port in discover_serial_ports() if not is_placeholder_port(port)]
+        print(f"  ok  serial ports: {', '.join(ports) if ports else 'none found'}")
+    except Exception as error:  # noqa: BLE001
+        print(f"  --  serial port listing failed: {error}")
+    return 0 if ok else 1
+
+
+def cmd_estop(args: argparse.Namespace) -> int:
+    with SerialProtocolTransport(args.port, args.baudrate, args.timeout) as transport:
+        if args.clear:
+            if not args.power_cutoff_confirmed:
+                raise SystemExit("--clear requires --power-cutoff-confirmed")
+            transport.estop_clear(cutoff_confirmed=True)
+            print_json({"status": "estop_cleared", "port": args.port, "armed": False})
+        else:
+            transport.estop()
+            print_json({"status": "estop_latched", "port": args.port})
     return 0
 
 
@@ -240,7 +339,48 @@ def build_parser() -> argparse.ArgumentParser:
     probe.add_argument("--power-cutoff-confirmed", action="store_true")
     probe.add_argument("--baudrate", type=int, default=115200)
     probe.add_argument("--timeout", type=float, default=1.0)
+    probe.add_argument("--slew-us-s", type=int, default=250, help="Firmware slew limit for probed channels (v0.2 firmware)")
     probe.set_defaults(func=cmd_probe)
+
+    rom = sub.add_parser(
+        "rom",
+        help="Record a channel's range of motion (two marks, any order) in a hardware map",
+        description="Stores [min(rom1, rom2), max(rom1, rom2)] on the channel's joint. With --port or --emulator "
+        "the range is also sent to the firmware as that channel's band (no motion, no arming).",
+    )
+    rom.add_argument("--map", required=True, type=Path)
+    rom.add_argument("--out", type=Path, help="Write here instead of updating --map in place")
+    rom.add_argument("--overwrite", action="store_true")
+    rom.add_argument("--channel", required=True, type=int)
+    rom.add_argument("--rom1", required=True, type=int, help="First mark, us")
+    rom.add_argument("--rom2", required=True, type=int, help="Second mark, us")
+    rom.add_argument("--operator", required=True, help="Name recorded as set_by")
+    rom.add_argument("--port", help="Also push the range to this controller (COM3, /dev/ttyUSB0, ...)")
+    rom.add_argument("--emulator", action="store_true", help="Push to the built-in emulator instead")
+    rom.add_argument("--slew-us-s", type=int, default=250)
+    rom.set_defaults(func=cmd_rom)
+
+    rom_gui = sub.add_parser("rom-gui", help="Open the range-of-motion window (sliders, Set ROM 1 / Set ROM 2, E-STOP)")
+    rom_gui.add_argument("--map", type=Path, help="Hardware map whose channels to show and save into")
+    rom_gui.add_argument("--out", type=Path, help="Save here instead of updating --map in place")
+    rom_gui.add_argument("--port", help="Preselect a serial port")
+    rom_gui.add_argument("--emulator", action="store_true", help="Preselect the built-in emulator")
+    rom_gui.add_argument("--channels", nargs="*", type=int, help="Only these channels")
+    rom_gui.add_argument("--operator", help="Name recorded as set_by")
+    rom_gui.add_argument("--band-us", type=int, default=300, help="Start band half-width before ROM is set (default 300)")
+    rom_gui.add_argument("--slew-us-s", type=int, default=200, help="Host slew limit for slider motion (default 200)")
+    rom_gui.set_defaults(func=cmd_rom_gui)
+
+    doctor = sub.add_parser("doctor", help="Check Python, optional extras, Tk and serial ports")
+    doctor.set_defaults(func=cmd_doctor)
+
+    estop = sub.add_parser("estop", help="Latch the controller e-stop (releases all outputs), or clear it")
+    estop.add_argument("--port", required=True)
+    estop.add_argument("--clear", action="store_true", help="Clear a latched e-stop (does not arm)")
+    estop.add_argument("--power-cutoff-confirmed", action="store_true")
+    estop.add_argument("--baudrate", type=int, default=115200)
+    estop.add_argument("--timeout", type=float, default=1.0)
+    estop.set_defaults(func=cmd_estop)
 
     demo = sub.add_parser("run-demo", help="Exercise CLI with a PTY emulator and synthetic observation fixture")
     demo.add_argument("--out", required=True, type=Path)

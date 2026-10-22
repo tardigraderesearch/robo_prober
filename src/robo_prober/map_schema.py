@@ -118,8 +118,30 @@ def validate_map(data: dict[str, Any]) -> None:
             for joint, values in joints.items()
         ]
     )
+    for joint, values in joints.items():
+        if "rom" in values:
+            validate_rom(joint, values["rom"])
+        if "last_position" in values:
+            last = values["last_position"]
+            pulse = last.get("pulse_us") if isinstance(last, dict) else None
+            if type(pulse) is not int or not 500 <= pulse <= 2500 or not last.get("at"):
+                raise MapValidationError(f"joint {joint}: last_position needs pulse_us in 500..2500 and at")
     if data.get("permission_hash") != stable_json_hash(data.get("probe_permissions")):
         raise MapValidationError("permission_hash mismatch")
+
+
+def validate_rom(joint: str, rom: Any) -> None:
+    """Check a ``rom`` (range of motion) block on a joint."""
+    if not isinstance(rom, dict):
+        raise MapValidationError(f"joint {joint}: rom must be an object")
+    values = [rom.get(key) for key in ("rom1_us", "rom2_us", "min_us", "max_us")]
+    if any(type(value) is not int or not 500 <= value <= 2500 for value in values):
+        raise MapValidationError(f"joint {joint}: rom pulses must be integers in 500..2500 us")
+    rom1, rom2, low, high = values
+    if rom1 == rom2 or low != min(rom1, rom2) or high != max(rom1, rom2):
+        raise MapValidationError(f"joint {joint}: rom min_us/max_us must be min/max of two different marks")
+    if not rom.get("set_by") or not rom.get("set_at"):
+        raise MapValidationError(f"joint {joint}: rom needs set_by and set_at")
 
 
 def export_atomic(data: dict[str, Any], path: Path, *, overwrite: bool = False) -> None:

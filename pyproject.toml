@@ -4,18 +4,22 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "robo-prober"
-version = "0.1.0"
-description = "Fail-closed robot controller discovery, opt-in servo probing, and hardware map / URDF export."
+version = "0.2.0"
+description = "Fail-closed robot controller discovery, opt-in servo probing, range-of-motion finding, and hardware map / URDF export."
 readme = "README.md"
 license = { text = "MIT" }
 authors = [{ name = "evilhobo1911" }]
 requires-python = ">=3.11"
-keywords = ["robotics", "esp32", "pca9685", "servo", "serial", "urdf", "aruco", "hardware-discovery"]
+keywords = ["robotics", "esp32", "pca9685", "servo", "serial", "urdf", "aruco", "hardware-discovery", "range-of-motion"]
 classifiers = [
   "Development Status :: 3 - Alpha",
   "Environment :: Console",
+  "Environment :: X11 Applications :: Tk",
   "Intended Audience :: Developers",
   "Intended Audience :: Science/Research",
+  "Operating System :: OS Independent",
+  "Operating System :: Microsoft :: Windows",
+  "Operating System :: MacOS",
   "Operating System :: POSIX :: Linux",
   "Programming Language :: Python :: 3",
   "Programming Language :: Python :: 3.11",
@@ -25,6 +29,7 @@ classifiers = [
 ]
 dependencies = [
   "pyserial>=3.5",
+  "Pillow>=10.0",
 ]
 
 [project.optional-dependencies]
