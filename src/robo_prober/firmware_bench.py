@@ -158,6 +158,17 @@ class FirmwareBench:
         with self._lock:
             return {ch: p for ch, p in self.outputs.items() if p is not None}
 
+    def wait_output(self, channel: int, pulse_us: int | None = None, timeout_s: float = 1.0) -> int:
+        """Wait until ``channel`` is driven (at ``pulse_us`` if given). Telemetry
+        arrives on a reader thread, so check this before timing a release."""
+        def ok():
+            p = self.outputs[channel]
+            return p is not None and (pulse_us is None or p == pulse_us)
+        with self._lock:
+            if not self._lock.wait_for(ok, timeout_s):
+                raise BenchError(f"channel {channel} not driven at {pulse_us} after {timeout_s} s")
+            return self.outputs[channel]
+
     def wait_released(self, timeout_s: float = 2.0) -> float:
         """Wait until every output is released; returns the seconds waited."""
         start = time.monotonic()

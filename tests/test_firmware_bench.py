@@ -48,6 +48,7 @@ def test_watchdog_releases_on_host_silence(bench):
     ctl = open_controller(bench)
     ctl.arm(power_cutoff_confirmed=True, heartbeat="manual")
     ctl.start(0, 1500)
+    bench.wait_output(0, 1500)
     silent_from = time.monotonic()
     bench.wait_released(2.0)
     assert time.monotonic() - silent_from < 1.3          # watchdog_ms=1000 plus a tick
@@ -61,6 +62,7 @@ def test_out_of_band_rejected_and_estop_latches(bench):
     ctl = open_controller(bench)
     ctl.arm(power_cutoff_confirmed=True)
     ctl.start(1, 1500)
+    bench.wait_output(1, 1500)
     with pytest.raises(ProtocolError, match="out_of_limits"):
         ctl.move(1, 1700)                                # default band 1400..1600
     time.sleep(0.05)
