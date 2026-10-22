@@ -1,70 +1,108 @@
 #include <Arduino.h>
+#include <Wire.h>
 
-// ROBOPROBE/1 reference firmware for a generic ESP32 dev board.
+// ROBOPROBE/1 firmware for a generic ESP32 / ESP32-S3 dev board driving a
+// PCA9685 16-channel servo board over I2C.
 //
-// This is a PROTOCOL REFERENCE: it implements the ROBOPROBE/1 line protocol
-// (HELLO / ARM / MOVE / STOP / DISARM) and acknowledges MOVE commands exactly
-// as the host expects, but it does NOT drive any output. Use it to verify the
-// host <-> controller path end to end with nothing attached.
+// The protocol and every safety rule live in rp_core.cpp (shared with the
+// native test simulator). This file only wires the core to the serial port,
+// the PCA9685 and an optional hardware e-stop input.
 //
-// To move real servos, add a PCA9685 output layer where marked below, and only
-// after you have a bench setup with a physical power cutoff.
+// Build-time options (PlatformIO build_flags, or #define at the top of this file):
+//   RP_OUTPUTS_NONE          protocol-only build, drives nothing (v0.1 behaviour)
+//   RP_I2C_SDA, RP_I2C_SCL   I2C pins (default: the board's Wire pins)
+//   RP_PCA9685_ADDR          I2C address (default 0x40)
+//   RP_PCA9685_OE_PIN        GPIO wired to the PCA9685 OE pin, -1 = not wired
+//   RP_PCA9685_OSC_HZ        oscillator calibration (default 25 MHz)
+//   RP_ESTOP_PIN             GPIO for a normally-closed e-stop switch to GND,
+//                            -1 = none. Pin high (switch open or wire cut)
+//                            latches ESTOP.
+//   RP_WATCHDOG_MS           release outputs if the host goes quiet this long
 
-bool armed = false;
+#include "pca9685_driver.h"
+#include "rp_core.h"
 
-String fieldValue(const String &line, const String &key) {
-  int start = line.indexOf(key + "=");
-  if (start < 0) {
-    return "";
-  }
-  start += key.length() + 1;
-  int end = line.indexOf(' ', start);
-  if (end < 0) {
-    end = line.length();
-  }
-  return line.substring(start, end);
+#ifndef RP_PCA9685_ADDR
+#define RP_PCA9685_ADDR 0x40
+#endif
+#ifndef RP_PCA9685_OE_PIN
+#define RP_PCA9685_OE_PIN -1
+#endif
+#ifndef RP_PCA9685_OSC_HZ
+#define RP_PCA9685_OSC_HZ 25000000UL
+#endif
+#ifndef RP_ESTOP_PIN
+#define RP_ESTOP_PIN -1
+#endif
+#ifndef RP_WATCHDOG_MS
+#define RP_WATCHDOG_MS 1000
+#endif
+
+namespace {
+
+#ifdef RP_OUTPUTS_NONE
+NullDriver driver;
+rp::Core core(driver, "esp32-robo-prober", "none", RP_WATCHDOG_MS);
+#else
+Pca9685Driver driver(RP_PCA9685_ADDR, RP_PCA9685_OE_PIN, RP_PCA9685_OSC_HZ, 50);
+rp::Core core(driver, "esp32-robo-prober", "pca9685", RP_WATCHDOG_MS);
+#endif
+
+rp::LineBuffer line_buffer;
+char reply[rp::kReplyMax];
+
+bool estopInputTripped() {
+#if RP_ESTOP_PIN >= 0
+  return digitalRead(RP_ESTOP_PIN) == HIGH;
+#else
+  return false;
+#endif
 }
 
+}  // namespace
+
 void setup() {
+#if RP_PCA9685_OE_PIN >= 0
+  // Disable PCA9685 outputs before anything else runs.
+  pinMode(RP_PCA9685_OE_PIN, OUTPUT);
+  digitalWrite(RP_PCA9685_OE_PIN, HIGH);
+#endif
+#if RP_ESTOP_PIN >= 0
+  pinMode(RP_ESTOP_PIN, INPUT_PULLUP);
+#endif
   Serial.begin(115200);
+#ifndef RP_OUTPUTS_NONE
+#if defined(RP_I2C_SDA) && defined(RP_I2C_SCL)
+  Wire.begin(RP_I2C_SDA, RP_I2C_SCL);
+#else
+  Wire.begin();
+#endif
+  driver.begin();  // a missing chip leaves the driver unavailable; ARM is then refused
+#endif
+  core.begin(millis());
 }
 
 void loop() {
-  if (!Serial.available()) {
-    return;
-  }
-  String line = Serial.readStringUntil('\n');
-  line.trim();
-  if (line == "HELLO") {
-    Serial.println("RP1 OK proto=ROBOPROBE/1 mode=disarmed id=esp32-reference");
-  } else if (line.startsWith("ARM ") && line.indexOf("cutoff=confirmed") >= 0 && line.indexOf("token=") >= 0) {
-    armed = true;
-    Serial.println("RP1 OK armed=1");
-  } else if (line == "DISARM") {
-    armed = false;
-    Serial.println("RP1 OK armed=0");
-  } else if (line == "STOP") {
-    armed = false;
-    Serial.println("RP1 OK stopped=1");
-  } else if (line.startsWith("MOVE ") && armed) {
-    // Output layer goes here: validate channel (0-15) and target_us, then
-    // command the PCA9685. STOP/DISARM must also release all outputs.
-    String seq = fieldValue(line, "seq");
-    String channel = fieldValue(line, "channel");
-    String target = fieldValue(line, "target_us");
-    if (seq.length() == 0 || channel.length() == 0 || target.length() == 0) {
-      Serial.println("RP1 ERR reason=bad_move_fields");
-      return;
+  while (Serial.available() > 0) {
+    int byte_in = Serial.read();
+    if (byte_in < 0) break;
+    switch (line_buffer.push(static_cast<char>(byte_in))) {
+      case rp::LineBuffer::Result::Line:
+        core.handleLine(line_buffer.line(), millis(), reply, sizeof(reply));
+        Serial.println(reply);
+        break;
+      case rp::LineBuffer::Result::Overflow:
+        Serial.println("RP1 ERR reason=line_too_long");
+        break;
+      case rp::LineBuffer::Result::BadBytes:
+        Serial.println("RP1 ERR reason=bad_bytes");
+        break;
+      case rp::LineBuffer::Result::Pending:
+        break;
     }
-    Serial.print("RP1 OK seq=");
-    Serial.print(seq);
-    Serial.print(" channel=");
-    Serial.print(channel);
-    Serial.print(" target_us=");
-    Serial.println(target);
-  } else if (line.startsWith("MOVE ")) {
-    Serial.println("RP1 ERR reason=disarmed");
-  } else {
-    Serial.println("RP1 ERR reason=unknown_command");
   }
+  if (estopInputTripped() && !core.estopLatched()) {
+    core.externalEstop();
+  }
+  core.tick(millis());
 }

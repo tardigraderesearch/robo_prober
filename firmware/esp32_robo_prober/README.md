@@ -1,33 +1,83 @@
-# ROBOPROBE/1 reference firmware (ESP32)
+# ROBOPROBE/1 firmware (ESP32 / ESP32-S3 + PCA9685)
 
-A minimal PlatformIO project for any classic ESP32 dev board (`esp32dev`).
-It speaks the `ROBOPROBE/1` serial protocol that `robo-prober probe` expects.
+PlatformIO (and Arduino IDE) project that speaks the `ROBOPROBE/1` serial
+protocol `robo-prober` expects and drives servos through a PCA9685
+16-channel PWM board over I2C. It contains no robot-specific channel maps:
+which channel is which joint is the host's business.
 
-**It does not drive any outputs.** MOVE commands are validated and
-acknowledged, nothing else. That lets you test discovery, identification,
-arming and the probe session end to end with nothing attached. Add your own
-PCA9685 output layer (see the comment in `src/main.cpp`) once you have a bench
-setup with a physical power cutoff.
+**Use it only on a bench with a physical power cutoff within reach.** The
+firmware limits what the host can ask for, but it cannot know whether your
+mechanism can safely reach even the default band.
+
+## Safety behaviour
+
+| Rule | What the firmware does |
+| --- | --- |
+| Boot | All 16 PCA9685 outputs fully off; OE pin (if wired) held high before anything else runs. |
+| Arming | `MOVE` is refused until `ARM token=<t> cutoff=confirmed`. The token is a session token; every `MOVE` and `HB` must carry it. A missing PCA9685 refuses `ARM` (`driver_unavailable`). |
+| Pulse band | Each channel has `min_us`/`neutral_us`/`max_us`. Default band: 1400 / 1500 / 1600 µs. The host can set another band with `LIMIT`; a driven channel only gets a band that contains its current position and target, so a band change never makes it jump. Targets outside the band are rejected (`out_of_limits`), and the written pulse is clamped to the band as a second guard. Absolute range 500–2500 µs. |
+| First output | Arming outputs nothing. A channel gets PWM only from `START channel=<c> pulse_us=<us> token=<t>`, at exactly that host-chosen pulse (inside the band); `MOVE` before that is refused (`not_started`). The firmware never picks a start pulse. |
+| Slew limit | After `START`, each `MOVE` target is approached at most `slew_us_s` µs per second (default 250, max 2000). |
+| Watchdog | While armed, if no `MOVE` or `HB` arrives for `watchdog_ms` (default 1000 ms), every output is released (PWM off) and the session is disarmed. |
+| Stop | `DISARM` and `STOP` release every output. `ESTOP` does too and latches: `ARM` is refused until `ESTOP_CLEAR cutoff=confirmed`. An optional normally-closed e-stop input (`RP_ESTOP_PIN`) latches the same e-stop when opened. |
+| Bad input | Malformed, unknown or overlong lines, non-printable bytes, unknown or duplicate fields are rejected with `RP1 ERR` and change nothing. They never move a servo. |
+| I2C errors | Any failed write releases everything and disarms (`fault=driver`). |
+
+## Wiring
+
+| ESP32 | ESP32-S3-DevKitC-1 | PCA9685 |
+| --- | --- | --- |
+| GPIO 21 | GPIO 8 | SDA |
+| GPIO 22 | GPIO 9 | SCL |
+| 3V3 | 3V3 | VCC (logic) |
+| GND | GND | GND |
+| optional GPIO | optional GPIO | OE (set `RP_PCA9685_OE_PIN`) |
+
+Servo power goes to the PCA9685 `V+` terminal from a separate supply through
+your physical cutoff, never from the ESP32's 3V3 or 5V pins. Override pins and
+options with `build_flags` in `platformio.ini`:
+
+| Flag | Default | Meaning |
+| --- | --- | --- |
+| `RP_I2C_SDA`, `RP_I2C_SCL` | board default | I2C pins |
+| `RP_PCA9685_ADDR` | `0x40` | I2C address |
+| `RP_PCA9685_OE_PIN` | `-1` | GPIO wired to OE (active low), `-1` = not wired |
+| `RP_PCA9685_OSC_HZ` | `25000000` | oscillator calibration |
+| `RP_ESTOP_PIN` | `-1` | normally-closed e-stop to GND; pin high latches ESTOP |
+| `RP_WATCHDOG_MS` | `1000` | host watchdog |
+| `RP_OUTPUTS_NONE` | off | protocol-only build that drives nothing |
 
 ## Build and flash
 
 ```bash
 pip install platformio
 cd firmware/esp32_robo_prober
-pio run                                   # compile
-pio run -t upload --upload-port /dev/ttyUSB0   # flash (your port may differ)
+pio run                                                    # builds esp32dev and esp32-s3-devkitc-1
+pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0   # Linux
+pio run -e esp32dev -t upload --upload-port COM3           # Windows
+pio run -e esp32dev -t upload --upload-port /dev/cu.usbserial-0001   # macOS
+```
+
+`pio run -e esp32dev-protocol-only` builds a variant that acknowledges
+everything but drives no outputs, for testing the host path with nothing
+attached.
+
+Arduino IDE: open `esp32_robo_prober.ino` (the code lives in `src/`), install
+the ESP32 board package, pick your board and upload. No extra libraries are
+needed; the PCA9685 driver is a few register writes over `Wire`.
+
+## Testing without hardware
+
+`src/rp_core.cpp` (the protocol and every safety rule) has no Arduino
+dependency. The Python test suite compiles it with the desktop C++ compiler
+together with `test/native/sim_main.cpp`, runs the same command scripts
+through it and through the Python device model, and requires identical replies.
+
+```bash
+c++ -std=c++17 -Isrc src/rp_core.cpp test/native/sim_main.cpp -o rp_sim
+printf 'HELLO\nARM token=t cutoff=confirmed\nMOVE channel=0 target_us=1550 seq=1 token=t\n@TICK 200\nSTATUS channel=0\n' | ./rp_sim
 ```
 
 ## Protocol
 
-ASCII, one command per line, 115200 baud:
-
-| Host sends | Firmware replies |
-| --- | --- |
-| `HELLO` | `RP1 OK proto=ROBOPROBE/1 mode=disarmed id=<id>` |
-| `ARM token=<token> cutoff=confirmed` | `RP1 OK armed=1` |
-| `MOVE channel=<0-15> target_us=<us> seq=<n>` | `RP1 OK seq=<n> channel=<c> target_us=<us>` (exact echo) |
-| `STOP` | `RP1 OK stopped=1` (outputs stop, disarmed) |
-| `DISARM` | `RP1 OK armed=0` |
-
-Errors are `RP1 ERR reason=<reason>`. MOVE while disarmed is rejected.
+See the [main README](../../README.md#roboprobe1-protocol) for the command table.
