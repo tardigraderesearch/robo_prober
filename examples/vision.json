@@ -1,0 +1,13 @@
+{
+  "dictionary": "DICT_4X4_50",
+  "dictionary_confirmed": false,
+  "reference_id": 0,
+  "markers": [
+    {"id": 0, "link": "base_link"},
+    {"id": 1, "link": "upper_arm_link"},
+    {"id": 2, "link": "forearm_link"}
+  ],
+  "pixel_threshold": 3.0,
+  "angle_threshold_deg": 3.0,
+  "calibration": null
+}

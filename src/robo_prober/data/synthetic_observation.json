@@ -1,0 +1,67 @@
+{
+  "kind": "synthetic_fixture",
+  "reference_marker_id": 0,
+  "threshold": 2.0,
+  "marker_link_map": {
+    "1": "base_link",
+    "2": "upper_arm_link",
+    "3": "forearm_link"
+  },
+  "before": {
+    "markers": [
+      {
+        "id": 0,
+        "x": 100.0,
+        "y": 100.0,
+        "angle_deg": 0.0
+      },
+      {
+        "id": 1,
+        "x": 140.0,
+        "y": 100.0,
+        "angle_deg": 0.0
+      },
+      {
+        "id": 2,
+        "x": 170.0,
+        "y": 120.0,
+        "angle_deg": 4.0
+      },
+      {
+        "id": 3,
+        "x": 200.0,
+        "y": 145.0,
+        "angle_deg": 8.0
+      }
+    ]
+  },
+  "after": {
+    "markers": [
+      {
+        "id": 0,
+        "x": 101.0,
+        "y": 99.0,
+        "angle_deg": 0.5
+      },
+      {
+        "id": 1,
+        "x": 145.0,
+        "y": 102.0,
+        "angle_deg": 1.0
+      },
+      {
+        "id": 2,
+        "x": 179.0,
+        "y": 126.0,
+        "angle_deg": 7.5
+      },
+      {
+        "id": 3,
+        "x": 213.0,
+        "y": 155.0,
+        "angle_deg": 13.0
+      }
+    ]
+  },
+  "provenance": "Synthetic fixture shipped with robo-prober; not a physical measurement."
+}

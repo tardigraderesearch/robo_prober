@@ -1,0 +1,11 @@
+{
+  "controller_node_id": "usb:/dev/ttyUSB0",
+  "board_profile_id": "esp32_devkitc_v4_wroom32",
+  "physical_power_cutoff_required": true,
+  "notes": "EXAMPLE ONLY. Replace every value with limits you have checked by hand on your own hardware.",
+  "channels": [
+    {"channel": 0, "route": "pca9685_servo", "neutral_us": 1500, "min_us": 1400, "max_us": 1600, "step_us": 40, "approved_by": "your-name", "approved_at": "2026-01-01T00:00:00Z"},
+    {"channel": 1, "route": "pca9685_servo", "neutral_us": 1500, "min_us": 1400, "max_us": 1600, "step_us": 40, "approved_by": "your-name", "approved_at": "2026-01-01T00:00:00Z"},
+    {"channel": 2, "route": "pca9685_servo", "neutral_us": 1500, "min_us": 1400, "max_us": 1600, "step_us": 40, "approved_by": "your-name", "approved_at": "2026-01-01T00:00:00Z"}
+  ]
+}

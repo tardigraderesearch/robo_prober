@@ -1,0 +1,26 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.eggs/
+
+# Environments and caches
+.venv/
+venv/
+.cache/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# PlatformIO
+.pio/
+.vscode/
+
+# Local outputs (captures, scans, generated maps)
+work/
+synthetic-arm/
+*.map.json

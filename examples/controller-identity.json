@@ -1,0 +1,7 @@
+{
+  "status": "chip_identified",
+  "port": "/dev/ttyUSB0",
+  "chip": "ESP32",
+  "board_selection": "esp32_devkitc_v4_wroom32",
+  "physical_compatibility": "operator to verify"
+}

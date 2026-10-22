@@ -1,0 +1,5 @@
+[
+  {"channel": 0, "joint": "base_yaw", "direction": "positive", "invert": false, "human_confirmed": true},
+  {"channel": 1, "joint": "shoulder", "direction": "negative", "invert": true, "human_confirmed": true},
+  {"channel": 2, "joint": "elbow", "direction": "positive", "invert": false, "human_confirmed": true}
+]

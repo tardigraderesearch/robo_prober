@@ -1,0 +1,66 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "robo-prober"
+version = "0.1.0"
+description = "Fail-closed robot controller discovery, opt-in servo probing, and hardware map / URDF export."
+readme = "README.md"
+license = { text = "MIT" }
+authors = [{ name = "evilhobo1911" }]
+requires-python = ">=3.11"
+keywords = ["robotics", "esp32", "pca9685", "servo", "serial", "urdf", "aruco", "hardware-discovery"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Intended Audience :: Science/Research",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Topic :: Scientific/Engineering",
+  "Topic :: System :: Hardware",
+]
+dependencies = [
+  "pyserial>=3.5",
+]
+
+[project.optional-dependencies]
+identify = [
+  "esptool>=5.0",
+]
+vision = [
+  "opencv-contrib-python-headless>=4.8",
+  "numpy>=1.26",
+]
+geometry = [
+  "numpy>=1.26",
+  "scipy>=1.11",
+  "trimesh>=4.0",
+  "yourdfpy>=0.0.60",
+  "opencv-contrib-python-headless>=4.8",
+]
+all = [
+  "robo-prober[identify,vision,geometry]",
+]
+test = [
+  "pytest>=8.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/evilhobo1911/robo-prober"
+Issues = "https://github.com/evilhobo1911/robo-prober/issues"
+
+[project.scripts]
+robo-prober = "robo_prober.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+robo_prober = ["data/*.json"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
