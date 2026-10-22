@@ -6,6 +6,8 @@ import pytest
 
 tk = pytest.importorskip("tkinter")
 
+pytestmark = pytest.mark.skipif(sys.platform == "darwin", reason="GUI tests are not run on macOS")
+
 
 @pytest.fixture
 def app(tmp_path):
