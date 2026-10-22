@@ -57,7 +57,8 @@ This is software. Keep a hand on the power cutoff the first time anything moves.
 ### 1. Install
 
 Easiest: download or clone the repository and start the launcher. It finds
-Python 3.11+, makes a private `.venv` next to itself, installs robo-prober into
+Python 3.11+ and hands over to `launcher.py` (standard library only, the same
+on every OS), which makes a private `.venv` next to itself, installs robo-prober into
 it (again only when something changed) and opens the range-of-motion window.
 Any robo-prober command can follow it.
 

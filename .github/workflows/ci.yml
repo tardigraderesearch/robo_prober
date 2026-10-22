@@ -86,7 +86,7 @@ jobs:
         shell: cmd
         run: |
           call run.bat doctor < NUL || exit /b 1
-          call run.bat doctor < NUL > second.txt || exit /b 1
+          call run.bat doctor < NUL > second.txt 2>&1 || exit /b 1
           type second.txt
           findstr /c:"already installed" second.txt || exit /b 1
           call run.bat run-demo --out launcher-demo.json < NUL || exit /b 1

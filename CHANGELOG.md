@@ -4,6 +4,14 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Fixed
+- `run.bat` failed on Windows because cmd mis-parsed Python one-liners inside
+  `for /f` and parenthesised blocks. `run.sh`, `run.command` and `run.bat` now only
+  find Python 3.11+ and hand over to a shared, stdlib-only `launcher.py`, so setup
+  behaves the same on every OS.
+
 ## [0.2.0] - 2026-10-22
 
 ### Added
