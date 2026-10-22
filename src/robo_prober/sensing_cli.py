@@ -47,8 +47,11 @@ def run(args):
     if command in ('prepare','propose','segment','validate-segments'):
         from . import geometry as g
     if command=='cameras':
+        import sys
         from .vision_pipeline import cameras
         result={'cameras':cameras()}
+        if not sys.platform.startswith('linux'):
+            result['note']='Camera listing needs Linux V4L2. On Windows/macOS pass a camera index (0, 1, ...) to capture --device.'
     elif command=='capture':
         result=bounded_capture(device=args.device,config_path=args.config,out=args.out,max_frames=args.frames,seconds=args.seconds,width=args.width,height=args.height,preview_window=args.preview)
     elif command=='replay':
@@ -80,7 +83,7 @@ def register(sub):
     vs=vision.add_subparsers(dest='sensing_action',required=True)
     p=vs.add_parser('cameras',help='List V4L2 cameras without opening them'); p.set_defaults(func=run)
     p=vs.add_parser('capture',help='Bounded camera capture with ArUco detection'); p.set_defaults(func=run)
-    p.add_argument('--device',required=True); p.add_argument('--config',required=True,type=Path); p.add_argument('--out',required=True,type=Path)
+    p.add_argument('--device',required=True,help='/dev/videoN on Linux, camera index 0, 1, ... on Windows/macOS'); p.add_argument('--config',required=True,type=Path); p.add_argument('--out',required=True,type=Path)
     p.add_argument('--frames',type=int,default=30); p.add_argument('--seconds',type=float,default=5.)
     p.add_argument('--width',type=int,default=1920); p.add_argument('--height',type=int,default=1080); p.add_argument('--preview',action='store_true')
     p=vs.add_parser('replay',help='Re-run detection on a recorded session and check agreement'); p.set_defaults(func=run); p.add_argument('session',type=Path); p.add_argument('--out',required=True,type=Path)

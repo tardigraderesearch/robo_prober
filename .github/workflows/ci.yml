@@ -2,21 +2,22 @@ name: CI
 
 on:
   push:
-    branches: [main]
   pull_request:
 
 jobs:
   test:
-    runs-on: ubuntu-latest
+    name: tests (${{ matrix.os }}, Python ${{ matrix.python }})
+    runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
-        python-version: ["3.11", "3.12"]
+        os: [ubuntu-latest, windows-latest, macos-latest]
+        python: ["3.11", "3.12"]
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: ${{ matrix.python }}
       - name: Install
         run: |
           python -m pip install --upgrade pip
@@ -24,8 +25,68 @@ jobs:
       - name: CLI smoke test
         run: |
           robo-prober --help
+          robo-prober doctor
           robo-prober boards --chip ESP32
-          robo-prober run-demo --out "$RUNNER_TEMP/demo-map.json"
-          robo-prober validate-map "$RUNNER_TEMP/demo-map.json"
-      - name: Test
-        run: python -m pytest -q
+          robo-prober run-demo --out demo-map.json
+          robo-prober validate-map demo-map.json
+          robo-prober rom --map demo-map.json --channel 0 --rom1 1700 --rom2 1300 --operator ci --emulator
+      - name: Install a virtual display (Linux GUI smoke test)
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y xvfb
+      - name: Tests (Linux, under Xvfb so the GUI smoke test runs)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a python -m pytest -v
+      - name: Tests
+        if: runner.os != 'Linux'
+        run: python -m pytest -v
+
+  firmware:
+    name: firmware build (PlatformIO)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - uses: actions/cache@v4
+        with:
+          path: ~/.platformio
+          key: platformio-${{ runner.os }}-${{ hashFiles('firmware/esp32_robo_prober/platformio.ini') }}
+      - name: Install PlatformIO
+        run: python -m pip install platformio
+      - name: Build esp32dev, esp32-s3-devkitc-1 and the protocol-only variant
+        run: pio run -d firmware/esp32_robo_prober -e esp32dev -e esp32-s3-devkitc-1 -e esp32dev-protocol-only
+      - name: Native firmware core with warnings as errors
+        run: |
+          c++ -std=c++17 -Wall -Wextra -Werror -Ifirmware/esp32_robo_prober/src \
+            firmware/esp32_robo_prober/src/rp_core.cpp firmware/esp32_robo_prober/test/native/sim_main.cpp -o rp_sim
+          printf 'HELLO\nARM token=ci cutoff=confirmed\nMOVE channel=0 target_us=1550 seq=1 token=ci\n' | ./rp_sim
+
+  launcher:
+    name: launcher (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: run.sh from a fresh clone (twice; second run must skip the install)
+        if: runner.os != 'Windows'
+        run: |
+          ./run.sh doctor
+          ./run.sh doctor 2> second.txt
+          grep -q "already installed" second.txt
+          ./run.sh run-demo --out launcher-demo.json
+      - name: run.bat from a fresh clone (twice; second run must skip the install)
+        if: runner.os == 'Windows'
+        shell: cmd
+        run: |
+          call run.bat doctor < NUL || exit /b 1
+          call run.bat doctor < NUL > second.txt || exit /b 1
+          type second.txt
+          findstr /c:"already installed" second.txt || exit /b 1
+          call run.bat run-demo --out launcher-demo.json < NUL || exit /b 1

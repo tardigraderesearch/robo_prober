@@ -2,6 +2,7 @@
 from __future__ import annotations
 import json
 import math
+import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -11,16 +12,98 @@ from .artifacts import digest, save_json
 
 
 def cameras():
+    """List V4L2 capture nodes without opening them (Linux only).
+
+    Other platforms have no open-free camera listing; there, `capture` takes an
+    explicit OpenCV camera index instead (see resolve_camera).
+    """
     result=[]
-    for p in sorted(Path('/sys/class/video4linux').glob('video*')):
+    root=Path('/sys/class/video4linux')
+    if not sys.platform.startswith('linux') or not root.is_dir():
+        return result
+    for p in sorted(root.glob('video*')):
         result.append({'device':'/dev/'+p.name,'name':(p/'name').read_text().strip(),
                        'index':int((p/'index').read_text()),'sysfs':str(p.resolve()),
                        'capture_candidate':(p/'index').read_text().strip()=='0' and 'loopback' not in (p/'name').read_text().lower()})
     return result
 
 
+def camera_backend(platform=None):
+    platform=platform or sys.platform
+    if platform.startswith('linux'):
+        return cv2.CAP_V4L2
+    if platform=='win32':
+        return cv2.CAP_DSHOW
+    if platform=='darwin':
+        return cv2.CAP_AVFOUNDATION
+    return cv2.CAP_ANY
+
+
+def resolve_camera(device, platform=None, inventory=None):
+    """Turn an explicit --device into something OpenCV can open.
+
+    Linux: an enumerated V4L2 capture node such as /dev/video0 (loopback and
+    metadata nodes are refused). Windows/macOS: a camera index such as 0.
+    """
+    platform=platform or sys.platform
+    if platform.startswith('linux'):
+        inventory=cameras() if inventory is None else inventory
+        matches=[x for x in inventory if x['device']==device and x['capture_candidate']]
+        if len(matches)!=1:
+            raise ValueError('Select an enumerated physical capture device, excluding loopback and metadata nodes')
+        return dict(matches[0],open_with=device)
+    if not isinstance(device,str) or not device.isdigit() or int(device)>63:
+        raise ValueError('On Windows and macOS pass the camera index (0, 1, ...) as --device')
+    return {'device':device,'name':f'camera index {device}','index':int(device),'capture_candidate':True,
+            'open_with':int(device),'enumeration':'explicit index (no open-free listing on this platform)'}
+
+
+def resolve_tag_names(cfg, base):
+    """Optional markers.json support: markers may name a tag instead of an ID.
+
+    With "markers_file": "markers.json" (a tag manifest such as aruco-tag-maker
+    writes), entries may use {"tag": "gripper", "link": ...} and the config may
+    use "reference_tag". Names are resolved to IDs here; the dictionary comes
+    from the manifest unless the config states the same one explicitly.
+    """
+    markers=cfg.get('markers')
+    source=cfg.get('markers_file')
+    if source is None:
+        if isinstance(markers,list) and any(isinstance(x,dict) and 'tag' in x and 'id' not in x for x in markers) or 'reference_tag' in cfg:
+            raise ValueError('Tag names need "markers_file" pointing at a markers.json')
+        return cfg
+    from .markers import load_markers
+    path=Path(source)
+    path=path if path.is_absolute() else Path(base)/path
+    manifest=load_markers(path)
+    cfg=dict(cfg)
+    if cfg.get('dictionary') is None:
+        cfg['dictionary']=manifest.dictionary
+    elif cfg['dictionary']!=manifest.dictionary:
+        raise ValueError(f"Config dictionary {cfg['dictionary']} differs from {path.name} ({manifest.dictionary})")
+    if isinstance(markers,list):
+        resolved=[]
+        for entry in markers:
+            entry=dict(entry) if isinstance(entry,dict) else entry
+            if isinstance(entry,dict) and 'tag' in entry:
+                tag_id=manifest.id_for(entry['tag'])
+                if entry.get('id',tag_id)!=tag_id:
+                    raise ValueError(f"Marker {entry['tag']!r} is id {tag_id} in {path.name}, not {entry['id']}")
+                entry['id']=tag_id
+            resolved.append(entry)
+        cfg['markers']=resolved
+    if 'reference_tag' in cfg:
+        tag_id=manifest.id_for(cfg.pop('reference_tag'))
+        if cfg.get('reference_id',tag_id)!=tag_id:
+            raise ValueError('reference_tag and reference_id disagree')
+        cfg['reference_id']=tag_id
+    cfg['markers_source']={'file':path.name,'dictionary':manifest.dictionary,'tag_size_mm':manifest.tag_size_mm}
+    del cfg['markers_file']
+    return cfg
+
+
 def load_config(path):
-    cfg=json.loads(Path(path).read_text())
+    cfg=resolve_tag_names(json.loads(Path(path).read_text()),Path(path).parent)
     name=cfg.get('dictionary')
     if not isinstance(name,str) or not name.startswith('DICT_') or not hasattr(cv2.aruco,name):
         raise ValueError('Invalid explicit ArUco dictionary')
@@ -85,10 +168,7 @@ def capture(device, config_path, out, max_frames=30, seconds=5., width=1920,heig
     cfg=load_config(config_path)
     if type(max_frames) is not int or not 1<=max_frames<=300 or not math.isfinite(seconds) or not 0<seconds<=30 or type(width) is not int or type(height) is not int or not 64<=width<=4096 or not 64<=height<=2160:
         raise ValueError('Capture requires 1..300 frames, >0..30 seconds, width 64..4096 and height 64..2160')
-    inventory=cameras()
-    matches=[x for x in inventory if x['device']==device and x['capture_candidate']]
-    if capture_factory is None and len(matches)!=1:
-        raise ValueError('Select an enumerated physical capture device, excluding loopback and metadata nodes')
+    matches=[] if capture_factory is not None else [resolve_camera(device)]
     if capture_factory is not None and evidence_kind!='synthetic_fixture':
         raise ValueError('Injected cameras must be labeled synthetic_fixture')
     out=Path(out); out.mkdir(parents=True,exist_ok=False); (out/'frames').mkdir()
@@ -96,7 +176,7 @@ def capture(device, config_path, out, max_frames=30, seconds=5., width=1920,heig
     cap=None
     start=time.monotonic(); started_utc=datetime.now(timezone.utc).isoformat(); records=[]; assets=[]; reason='bounded'; error=None; resolution=None
     try:
-        cap=(capture_factory or (lambda path:cv2.VideoCapture(path,cv2.CAP_V4L2)))(device)
+        cap=(capture_factory or (lambda _:cv2.VideoCapture(matches[0]['open_with'],camera_backend())))(device)
         if not cap.isOpened():
             raise ValueError(f'Could not open camera {device}')
         cap.set(cv2.CAP_PROP_FOURCC,cv2.VideoWriter_fourcc(*'MJPG'))

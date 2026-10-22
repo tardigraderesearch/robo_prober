@@ -115,3 +115,18 @@ def test_watchdog_rejects_invalid_bound_before_spawn(monkeypatch):
     from robo_prober import sensing_cli
     monkeypatch.setattr(sensing_cli.multiprocessing,'get_context',lambda _:pytest.fail('Invalid capture spawned'))
     with pytest.raises(ValueError):sensing_cli.bounded_capture(seconds=float('nan'))
+
+
+def test_camera_device_resolution_per_platform():
+    inventory=[{'device':'/dev/video0','name':'cam','index':0,'capture_candidate':True},
+               {'device':'/dev/video1','name':'cam meta','index':1,'capture_candidate':False}]
+    assert v.resolve_camera('/dev/video0','linux',inventory)['open_with']=='/dev/video0'
+    for bad in ('/dev/video1','/dev/video9','0'):
+        with pytest.raises(ValueError):
+            v.resolve_camera(bad,'linux',inventory)
+    for platform in ('win32','darwin'):
+        assert v.resolve_camera('1',platform)['open_with']==1
+        for bad in ('/dev/video0','-1','cam','99'):
+            with pytest.raises(ValueError):
+                v.resolve_camera(bad,platform)
+    assert v.camera_backend('win32')==cv2.CAP_DSHOW and v.camera_backend('darwin')==cv2.CAP_AVFOUNDATION
