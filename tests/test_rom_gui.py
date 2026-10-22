@@ -122,3 +122,32 @@ def test_window_controls(app):
     assert not app.armed
     app.request_close()                              # not armed: no question asked
     assert app._closed
+
+
+def test_start_value_follows_last_position_without_a_map(tmp_path):
+    """Found by the virtual bench (DTG sim/): with no map loaded, E-STOP kept the
+    old start value on screen, and the next Enable snapped the servo back to it."""
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        pytest.skip("no X display (run under xvfb-run)")
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk cannot open a window here: {exc}")
+    root.withdraw()
+    from robo_prober.rom_gui import RomApp
+    app = RomApp(root, port="emulator", channels=[0], operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    try:
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        app.rows[0]["start_var"].set("1500")
+        app.enable(0)
+        drag(app, 0, 1350)
+        settle(app, 0, 1350)
+        app.estop()
+        assert app.rows[0]["start_var"].get() == "1350"
+        app.clear_estop()
+        app.connect_and_arm()
+        app.enable(0)
+        assert app.controller.transport.connection.device.write_log[-1] == (0, 1350)
+    finally:
+        app.close()

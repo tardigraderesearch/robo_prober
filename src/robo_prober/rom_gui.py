@@ -470,8 +470,16 @@ class RomApp:
         self._refresh_all()
 
     def _persist_positions(self) -> Path | None:
-        """Write each channel's last commanded pulse into the map so the next session starts there."""
-        if self.hardware_map is None or self.session is None or not self.session.last_positions:
+        """Show each channel's last commanded pulse as its next start value and,
+        with a map loaded, write it into the map so the next session starts there."""
+        if self.session is None or not self.session.last_positions:
+            return None
+        # Always refresh the shown start values, map or not: Enable starts at the
+        # shown value, and a stale one makes the servo jump on the next Enable.
+        if not self._closed:
+            for channel in self.rows:
+                self.rows[channel]["start_var"].set(str(self.roms[channel].center))
+        if self.hardware_map is None:
             return None
         target = self.out_path or self.map_path
         try:
@@ -481,9 +489,6 @@ class RomApp:
             self._say(f"Could not save last positions: {error}", error=True)
             return None
         self.hardware_map = updated
-        if not self._closed:
-            for channel in self.rows:
-                self.rows[channel]["start_var"].set(str(self.roms[channel].center))
         return target
 
     def save(self) -> Path | None:
