@@ -11,6 +11,19 @@ what you learned as a validated hardware map or URDF.
 
 [![CI](https://github.com/evilhobo1911/robo-prober/actions/workflows/ci.yml/badge.svg)](https://github.com/evilhobo1911/robo-prober/actions/workflows/ci.yml)
 
+
+## Hardware test status
+
+| Passed on real hardware (ESP32-S3) | Physical test pending |
+|---|---|
+| Pin survey (driven / pulled / floating), no PCA9685 needed | ESP32, S2, C3, C6 (builds and simulator only) |
+| Identify: one-pin buzz, Y/N, naming | Raspberry Pi 4 / 5 / Zero 2 W and Jetson Orin agent (emulated GPIO only) |
+| Range of motion (ROM 1 / ROM 2, relative sliders, narrow/widen) | Firmware backup / install / restore from the app (esptool mocked in tests) |
+| E-stop latch, disarm, map save | PCA9685 discovery, LED blink, button watch, I2C scan on hardware |
+| | "Set all servos to 0", servo database picker |
+
+Everything in the right column is covered by automated tests but has not yet run on a physical board.
+
 ## Who it's for
 
 Hobbyists, students and researchers who have a servo-driven robot (an arm, a
@@ -364,7 +377,7 @@ writing. `validate-map` checks the schema, the joint/channel uniqueness, any
 | Operating systems | Linux (any distribution), Windows 10/11, macOS. CI runs the tests on all three with Python 3.11 and 3.12. |
 | Controller | Anything that speaks `ROBOPROBE/1` over serial. Reference firmware: ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6 (all build). |
 | Servo outputs | PCA9685-style 16-channel servo boards (channels 0–15) and servos straight on GPIO pins (channel 100+N, LEDC PWM), 500–2500 µs. |
-| Verified on hardware | Not yet for the v0.3 discovery firmware: the survey, watch, I2C scan, GPIO servo and blink paths are tested against the compiled firmware core in a native simulator and the Python model only. |
+| Verified on hardware | ESP32-S3, 2026-10-22: a 3-servo arm with servos straight on GPIO, no prior wiring info. Discover, Identify (buzz + Y/N + names), range of motion and map save passed. Other boards and features: see *Hardware test status* below. |
 | Chip identification | ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6 (via `esptool`). |
 | Board catalog | ESP32 SoC references, ESP32-DevKitC V4, ESP32-S3-DevKitC-1, Raspberry Pi Pico / Pico W, Arduino Uno R3. The firmware's pin tables are generated from it (`python -m robo_prober.firmware_pins`). |
 | USB bridges recognized | CP210x, CH340, CH343, FT232, Espressif native USB, Arduino Uno, Pico. |
