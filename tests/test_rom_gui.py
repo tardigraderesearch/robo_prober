@@ -420,3 +420,162 @@ def test_set_all_servos_to_zero_warns_then_holds_at_1500():
         assert app.controller.position(104) == 1500 and app.found[t.key].start_us == 1500
     finally:
         app.close()
+
+
+def _bench_app(tmp_path):
+    from robo_prober import find
+    from robo_prober.rom_gui import RomApp
+
+    root = _fw_root()
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    app.cutoff_var.set(True)
+    app.connect_and_arm()
+    app.discover()
+    pins = [t for t in app._identify_targets() if t.pin is not None][:3]
+    a, b, led = pins
+    app.found[a.key] = find.Found(a, "servo", "shoulder", 1500)
+    app.found[b.key] = find.Found(b, "servo", "elbow", 1600)
+    app.found[led.key] = find.Found(led, "led", "status LED")
+    app._refresh_found()
+    return app, a, b
+
+
+def _settle_all(app, channels):
+    import time
+    for _ in range(400):
+        app.tick(0.05)
+        time.sleep(0.005)
+        if all(app.controller.status(ch)["current_us"] == app.controller.position(ch) for ch in channels):
+            return
+    raise AssertionError("did not settle")
+
+
+def _slot(device, channel):
+    from robo_prober.reference_device import CHANNELS
+    return device.channels[channel if channel < 100 else CHANNELS + channel - 100]
+
+
+class _Ev:
+    def __init__(self, x, y):
+        self.x_root, self.y_root = x, y
+
+
+def test_bench_tiles_click_drag_power_up_group_and_band(tmp_path):
+    app, a, b = _bench_app(tmp_path)
+    try:
+        assert app.steps.tab(2, "text") == "3. Bench" and app.steps.tab(3, "text") == "4. Range of motion"
+        assert list(app.bench_tiles) == [a.key, b.key]            # identified servos only (no LED)
+        device = app.controller.transport.connection.device
+        # click toggles
+        app._drag_press(a.key, "tile", _Ev(0, 0))
+        app._drag_release(_Ev(0, 0))
+        assert app.bench == [a.key]
+        app._drag_press(a.key, "tile", _Ev(0, 0))
+        app._drag_release(_Ev(0, 0))
+        assert app.bench == []
+        # drag onto the bench zone
+        app.steps.select(2)
+        app.root.update()
+        zone = app.bench_zone
+        inside = _Ev(zone.winfo_rootx(), zone.winfo_rooty())
+        for key in (a.key, b.key):
+            app._drag_press(key, "tile", _Ev(-500, -500))
+            app._drag_motion(_Ev(-400, -400))
+            app._drag_release(inside)
+        assert app.bench == [a.key, b.key]
+        # dragging a bench row off removes it (nothing released)
+        app._drag_press(b.key, "bench", inside)
+        app._drag_motion(_Ev(-400, -400))
+        app._drag_release(_Ev(-4000, -4000))
+        assert app.bench == [a.key]
+        app.add_to_bench(b.key)
+
+        # nothing outputs before the confirmation
+        app.bench_rows[a.key]["var"].set(100)
+        app.tick()
+        assert device.write_log == []
+        asked = []
+        app.ask_fn = lambda title, text, options: asked.append(text) or "Cancel"
+        app.bench_power_up()
+        assert "re-mount servo horns" in asked[0] and "shoulder at 1500 us" in asked[0] and "elbow at 1600 us" in asked[0]
+        assert device.write_log == []
+        app.ask_fn = lambda title, text, options: options[0]
+        app.bench_power_up()
+        assert app.controller.position(a.channel) == 1500 and app.controller.position(b.channel) == 1600
+        assert (_slot(device, a.channel).min_us, _slot(device, a.channel).max_us) == (1200, 1800)
+        assert _slot(device, a.channel).slew_us_s == 250       # firmware slew cap: smooth moves
+
+        # group slider moves all, respecting Invert
+        app.bench_rows[b.key]["invert"].set(True)
+        app.group_var.set(100)
+        _settle_all(app, [a.channel, b.channel])
+        assert app.controller.position(a.channel) == 1600 and app.controller.position(b.channel) == 1500
+        # band respected
+        app.bench_rows[a.key]["var"].set(900)
+        _settle_all(app, [a.channel])
+        assert app.controller.position(a.channel) == 1800
+        app.bench_back_to_zero()
+        _settle_all(app, [a.channel, b.channel])
+        assert app.controller.position(a.channel) == 1500 and app.controller.position(b.channel) == 1600
+
+        # Use as start
+        app.bench_rows[a.key]["var"].set(-150)
+        _settle_all(app, [a.channel])
+        app.bench_use_as_start(a.key)
+        assert app.found[a.key].start_us == 1350 and app.bench_rows[a.key]["var"].get() == 0
+        assert (_slot(device, a.channel).min_us, _slot(device, a.channel).max_us) == (1050, 1650)
+
+        # to step 4: start values carry over, held servos start where they are
+        path = tmp_path / "bench.map.json"
+        app.go_to_rom(path)
+        assert app.steps.index("current") == 3 and app.armed
+        assert app.rows[a.channel]["start_var"].get() == "1350"
+        assert app.rows[b.channel]["start_var"].get() == "1600"
+        app.enable(a.channel)
+        assert device.write_log[-1] == (a.channel, 1350)            # no snap
+    finally:
+        app.close()
+
+
+def test_bench_use_as_start_updates_rom_row_and_estop(tmp_path):
+    app, a, b = _bench_app(tmp_path)
+    try:
+        app.go_to_rom(tmp_path / "m.map.json")
+        app.steps.select(2)
+        app.add_to_bench(a.key)
+        app.ask_fn = lambda title, text, options: options[0]
+        assert app.bench_power_up()
+        assert app._enabled(a.channel)                              # driven through step 4's session
+        app.bench_rows[a.key]["var"].set(120)
+        _settle_all(app, [a.channel])
+        assert app.controller.position(a.channel) == 1620
+        app.bench_use_as_start(a.key)
+        assert app.found[a.key].start_us == 1620 and app.rows[a.channel]["start_var"].get() == "1620"
+        app.estop()
+        assert app.controller.position(a.channel) is None and app.estop_latched
+        app.root.update()
+        assert app.bench_rows[a.key]["var"].get() == 0
+    finally:
+        app.close()
+
+
+def test_bench_buzz_keeps_holding(tmp_path):
+    app, a, b = _bench_app(tmp_path)
+    app.wiggle_slew_us_s = 2000
+    try:
+        app.add_to_bench(a.key)
+        app.ask_fn = lambda title, text, options: options[0]
+        app.bench_buzz(a.key)
+        assert app.wiggle is not None
+        _settle_all(app, [a.channel])
+        import time
+        for _ in range(400):
+            app.tick(0.05)
+            time.sleep(0.005)
+            if app.wiggle is None:
+                break
+        assert app.wiggle is None and app.controller.position(a.channel) == 1500
+        assert app.controller.transport.connection.device.output(a.channel) is not None  # still holding
+        assert _slot(app.controller.transport.connection.device, a.channel).min_us == 1200   # band restored
+    finally:
+        app.close()

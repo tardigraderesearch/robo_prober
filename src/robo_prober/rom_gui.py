@@ -1,14 +1,17 @@
-"""The robo-prober window (tkinter + ttk), in three steps:
+"""The robo-prober window (tkinter + ttk), in four steps:
 
 1. Discover: read-only survey of the controller's pins and I2C bus, and a
    button watch.
 2. Identify: one pin (or PCA9685 channel) at a time, wiggle it as a servo
    or blink it, say what happened and name it; save the hardware map.
-3. Range of motion: one row per named servo: a confirmed start pulse with an
+3. Bench: drag the identified servos (tiles on the right) onto the bench and
+   move them together or one by one, each inside its start +/-300 us; pick
+   each one's start pulse for step 4.
+4. Range of motion: one row per named servo: a confirmed start pulse with an
    Enable button, a slider the servo follows slowly, "Set ROM 1" and
    "Set ROM 2", Clear and Widen.
 
-The connection bar and the E-STOP stay visible above all three. All logic
+The connection bar and the E-STOP stay visible above all four. All logic
 lives in find.py, rom.py and api.py; this file only wires widgets to them.
 """
 from __future__ import annotations
@@ -30,6 +33,7 @@ from .rom import (
     ABS_MAX_US,
     ABS_MIN_US,
     DEFAULT_BAND_HALF_US,
+    DEFAULT_FIRMWARE_SLEW_US_S,
     DEFAULT_HOST_SLEW_US_S,
     RomChannel,
     RomError,
@@ -107,6 +111,18 @@ class RomApp:
         self._watch_ticks = 0
         self._found_path: Path | None = None
         self.wiggle_slew_us_s = find.DEFAULT_WIGGLE_SLEW_US_S
+        # 3. bench: servos (found keys) the operator put on the bench
+        self.bench: list[str] = []
+        self.bench_roms: dict[str, RomChannel] = {}   # each servo's start and allowed band (before step 4)
+        self.bench_rows: dict[str, dict[str, Any]] = {}
+        self.bench_tiles: dict[str, dict[str, Any]] = {}
+        self.bench_invert: dict[str, bool] = {}
+        self.bench_pending: dict[int, int] = {}       # channel -> target, sent by the next tick
+        self.bench_buzz_queue: list[str] = []
+        self._bench_buzz: str | None = None
+        self._drag: dict[str, Any] | None = None
+        self._ghost: tk.Label | None = None
+        self._group_last = 0.0
 
         self.port_var = tk.StringVar(value=EMULATOR_LABEL if port == EMULATOR_PORT else (port or ""))
         self.cutoff_var = tk.BooleanVar(value=False)
@@ -119,6 +135,7 @@ class RomApp:
         self.name_var = tk.StringVar()
         self.survey_var = tk.StringVar(value="Not discovered yet. Press Discover: it only reads the pins.")
         self.target_var = tk.StringVar(value="Discover first.")
+        self.group_var = tk.DoubleVar(value=0)
 
         self._build()
         self.refresh_ports()
@@ -184,13 +201,15 @@ class RomApp:
                                    font=("TkDefaultFont", 18, "bold"), width=8, height=2, relief="raised", bd=4)
         self.estop_btn.grid(row=0, column=3, rowspan=3, sticky="ne", padx=(12, 0))
 
-        # steps: 1 discover, 2 identify, 3 range of motion
+        # steps: 1 discover, 2 identify, 3 bench, 4 range of motion
         self.steps = ttk.Notebook(outer)
         self.steps.grid(row=1, column=0, rowspan=2, sticky="nsew", pady=(10, 0))
         self._build_discover(ttk.Frame(self.steps, padding=10))
         self._build_identify(ttk.Frame(self.steps, padding=10))
+        self._build_bench(ttk.Frame(self.steps, padding=10))
+        self.steps.bind("<<NotebookTabChanged>>", lambda e: self._refresh_bench())
         rom_tab = ttk.Frame(self.steps, padding=(4, 8))
-        self.steps.add(rom_tab, text="3. Range of motion")
+        self.steps.add(rom_tab, text="4. Range of motion")
         rom_tab.columnconfigure(0, weight=1)
         rom_tab.rowconfigure(2, weight=1)
 
@@ -220,9 +239,9 @@ class RomApp:
         self._rows_window = self.canvas.create_window((0, 0), window=self.rows_frame, anchor="nw")
         self.rows_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
         self.canvas.bind("<Configure>", lambda e: self.canvas.itemconfigure(self._rows_window, width=e.width))
-        root.bind_all("<MouseWheel>", lambda e: self.canvas.yview_scroll(-1 if e.delta > 0 else 1, "units"))
-        root.bind_all("<Button-4>", lambda e: self.canvas.yview_scroll(-1, "units"))
-        root.bind_all("<Button-5>", lambda e: self.canvas.yview_scroll(1, "units"))
+        root.bind_all("<MouseWheel>", lambda e: self._wheel_canvas().yview_scroll(-1 if e.delta > 0 else 1, "units"))
+        root.bind_all("<Button-4>", lambda e: self._wheel_canvas().yview_scroll(-1, "units"))
+        root.bind_all("<Button-5>", lambda e: self._wheel_canvas().yview_scroll(1, "units"))
 
         self.status_label = ttk.Label(outer, textvariable=self.status, wraplength=900)
         self.status_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
@@ -323,6 +342,73 @@ class RomApp:
         self.to_rom_btn = ttk.Button(bottom, text="Go to range of motion", style="Accent.TButton",
                                      command=self.go_to_rom)
         self.to_rom_btn.pack(side="left", padx=6)
+        self.to_bench_btn = ttk.Button(bottom, text="Go to bench", command=lambda: self.steps.select(2))
+        self.to_bench_btn.pack(side="left")
+
+    def _build_bench(self, tab: ttk.Frame) -> None:
+        self.steps.add(tab, text="3. Bench")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(1, weight=1)
+        ttk.Label(tab, text="Drag servos from the right onto the bench (or click them). Each one moves only "
+                            "inside its start +/-300 us, slowly.", style="Muted.TLabel", wraplength=900).grid(
+            row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+
+        self.bench_zone = ttk.LabelFrame(tab, text="Bench", padding=(10, 6))
+        self.bench_zone.grid(row=1, column=0, sticky="nsew", padx=(0, 10))
+        self.bench_zone.columnconfigure(0, weight=1)
+        self.bench_zone.rowconfigure(2, weight=1)
+        group = ttk.Frame(self.bench_zone)
+        group.grid(row=0, column=0, sticky="ew")
+        group.columnconfigure(0, weight=1)
+        self.group_scale = tk.Scale(group, from_=-DEFAULT_BAND_HALF_US, to=DEFAULT_BAND_HALF_US, orient="horizontal",
+                                    resolution=1, showvalue=True, variable=self.group_var,
+                                    label="All together: us from start (Invert flips a servo)",
+                                    background=theme.BG, foreground=theme.TEXT, troughcolor=theme.SURFACE_HI,
+                                    activebackground=theme.ACCENT, highlightthickness=0, borderwidth=0,
+                                    sliderrelief="flat", font=theme.FONT)
+        self.group_scale.grid(row=0, column=0, sticky="ew")
+        self.group_var.trace_add("write", lambda *_: self._group_moved())
+        bar = ttk.Frame(group)
+        bar.grid(row=1, column=0, sticky="w", pady=(4, 0))
+        self.bench_power_btn = ttk.Button(bar, text="Power up", style="Accent.TButton",
+                                          command=lambda: self.bench_power_up())
+        self.bench_buzz_all_btn = ttk.Button(bar, text="Buzz all", command=self.bench_buzz_all)
+        self.bench_zero_btn = ttk.Button(bar, text="Back to 0", command=self.bench_back_to_zero)
+        for widget in (self.bench_power_btn, self.bench_buzz_all_btn, self.bench_zero_btn):
+            widget.pack(side="left", padx=(0, 6))
+        self.bench_empty = ttk.Label(self.bench_zone, text="Drop servos here (or click a tile on the right).",
+                                     style="Big.TLabel")
+        self.bench_empty.grid(row=1, column=0, sticky="w", pady=(10, 0))
+
+        holder = ttk.Frame(self.bench_zone)
+        holder.grid(row=2, column=0, sticky="nsew", pady=(6, 0))
+        holder.columnconfigure(0, weight=1)
+        holder.rowconfigure(0, weight=1)
+        self.bench_canvas = tk.Canvas(holder, highlightthickness=0, borderwidth=0, background=theme.BG)
+        scroll = ttk.Scrollbar(holder, orient="vertical", command=self.bench_canvas.yview)
+        self.bench_canvas.configure(yscrollcommand=scroll.set)
+        self.bench_canvas.grid(row=0, column=0, sticky="nsew")
+        scroll.grid(row=0, column=1, sticky="ns")
+        self.bench_frame = ttk.Frame(self.bench_canvas)
+        self.bench_frame.columnconfigure(0, weight=1)
+        window = self.bench_canvas.create_window((0, 0), window=self.bench_frame, anchor="nw")
+        self.bench_frame.bind("<Configure>", lambda e: self.bench_canvas.configure(
+            scrollregion=self.bench_canvas.bbox("all")))
+        self.bench_canvas.bind("<Configure>", lambda e: self.bench_canvas.itemconfigure(window, width=e.width))
+
+        self.tiles_box = ttk.LabelFrame(tab, text="Servos", padding=(8, 6))
+        self.tiles_box.grid(row=1, column=1, sticky="nsew")
+        self.no_tiles = ttk.Label(self.tiles_box, text="No servos yet:\nidentify them in step 2.",
+                                  style="Muted.TLabel", justify="left")
+        self.no_tiles.pack(anchor="w")
+        bottom = ttk.Frame(tab)
+        bottom.grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        self.bench_to_rom_btn = ttk.Button(bottom, text="Go to range of motion", style="Accent.TButton",
+                                           command=self.go_to_rom)
+        self.bench_to_rom_btn.pack(side="left")
+
+    def _wheel_canvas(self) -> tk.Canvas:
+        return self.bench_canvas if self.steps.index("current") == 2 else self.canvas
 
     def _set_channels(self, roms: list[RomChannel]) -> None:
         for row in self.rows.values():
@@ -421,6 +507,7 @@ class RomApp:
         self.save_btn.state(["!disabled"] if self.hardware_map is not None else ["disabled"])
         if hasattr(self, "wiggle_btn"):
             self._refresh_identify()
+        self._refresh_bench()
 
     def _refresh_row(self, channel: int) -> None:
         if channel not in self.rows:
@@ -925,7 +1012,8 @@ class RomApp:
         else:
             self.name_row.grid_remove()
         self.save_map_btn.state(["!disabled"] if self._named_servos() else ["disabled"])
-        self.to_rom_btn.state(["!disabled"] if self._named_servos() else ["disabled"])
+        for button in (self.to_rom_btn, self.to_bench_btn, self.bench_to_rom_btn):
+            button.state(["!disabled"] if self._named_servos() and not busy else ["disabled"])
 
     def _named_servos(self) -> bool:
         return any(item.kind == "servo" for item in self.found.values())
@@ -936,9 +1024,11 @@ class RomApp:
         for item in self.found.values():
             what = {"servo": "servo", "led": "light / sound", "button": "button", "unused": "nothing"}[item.kind]
             table.insert("", "end", values=(item.target.key, what, item.name or "-"))
+        self._refresh_bench()
 
     def _probe_error(self, error: Exception) -> None:
         """Refusals (driven pin, no PWM slot, ...) are messages; anything else stops everything."""
+        self._bench_stop_activity()
         if isinstance(error, ProtocolError) and "returned error" in str(error):
             self.wiggle = None
             self.last_action = ""
@@ -1084,6 +1174,10 @@ class RomApp:
         except Exception as error:  # noqa: BLE001
             self._probe_error(error)
             return
+        for found in servos:
+            self.bench_roms.pop(found.target.key, None)  # re-created around the new start
+        self._bench_back_to_zero()
+        self._refresh_bench()
         self._say(f"Holding {', '.join(done)} at {zero} us (0). Re-mount the horns at the middle of each joint's "
                   "travel, then continue. Disarm or E-STOP releases them.")
         self._refresh_identify()
@@ -1140,10 +1234,500 @@ class RomApp:
         folder.mkdir(parents=True, exist_ok=True)
         return folder / f"{board}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.map.json"
 
+    # ------------------------------------------------------------ 3. bench
+    def _bench_servos(self) -> dict[str, find.Found]:
+        return {key: item for key, item in self.found.items() if item.kind == "servo"}
+
+    def _bench_name(self, key: str) -> str:
+        found = self.found.get(key)
+        return (found.name if found is not None and found.name else key)
+
+    def _bench_in_session(self, channel: int) -> bool:
+        """With step 4's session running, its channels are driven through it (same band, same targets)."""
+        return self._rom_started() and channel in self.session.channels
+
+    def _bench_powered(self, key: str) -> bool:
+        channel = self.found[key].target.channel
+        if self._bench_in_session(channel):
+            return self._enabled(channel)
+        return self.armed and self.controller.position(channel) is not None
+
+    def _bench_rom(self, key: str) -> RomChannel:
+        """The servo's start pulse and allowed band (RomChannel does the band arithmetic)."""
+        found = self.found[key]
+        channel = found.target.channel
+        if self._bench_in_session(channel):
+            return self.roms[channel]
+        start = found.start_us or find.DEFAULT_START_US
+        model = self.bench_roms.get(key)
+        if model is None or model.channel != channel:
+            model = RomChannel(channel, self._bench_name(key), start, self.band_half_us)
+            self.bench_roms[key] = model
+        elif model.start_us != start and not self._bench_powered(key):
+            model.set_start(start)
+        return model
+
+    def _bench_target(self, key: str) -> int:
+        model = self._bench_rom(key)
+        try:
+            offset = float(self.bench_rows[key]["var"].get())
+        except (KeyError, ValueError, tk.TclError):
+            offset = 0.0
+        return model.clamp(model.center + offset)
+
+    def _bench_stop_activity(self) -> None:
+        self.bench_pending.clear()
+        self.bench_buzz_queue.clear()
+        self._bench_buzz = None
+
+    def _bench_ready(self) -> bool:
+        if not self.armed:
+            self._say("Confirm the power cutoff and Connect & arm first.", error=True)
+            return False
+        if self.wiggle is not None:
+            self._say("Wait for the buzz to finish.", error=True)
+            return False
+        return True
+
+    def _bench_error(self, key: str, error: Exception) -> None:
+        """No free PWM slot and other refusals are messages; anything else stops everything."""
+        self._bench_stop_activity()
+        name = f"{self._bench_name(key)} ({self.found[key].target.key})"
+        if "no_pwm_slot" in str(error):
+            self._say(f"Refused: no free PWM slot for {name}. The board can drive only a few servo pins at once. "
+                      "Disarm releases them all (taking a servo off the bench does not).", error=True)
+        elif isinstance(error, RomError) or (isinstance(error, ProtocolError) and "returned error" in str(error)):
+            self._say(f"Refused for {name}: {error}", error=True)
+        else:
+            self._fault_or_say(error)
+        self._refresh_bench()
+
+    # -- tiles, drag and drop
+    def toggle_bench(self, key: str) -> None:
+        if key in self.bench:
+            self.remove_from_bench(key)
+        else:
+            self.add_to_bench(key)
+
+    def add_to_bench(self, key: str) -> None:
+        if key not in self._bench_servos() or key in self.bench:
+            return
+        self.bench.append(key)
+        self._refresh_bench()
+        model = self._bench_rom(key)
+        if self._bench_powered(key):
+            self._say(f"{self._bench_name(key)} is on the bench (holding at "
+                      f"{self.controller.position(model.channel)} us).")
+        else:
+            self._say(f"{self._bench_name(key)} is on the bench. Power up starts it at {model.center} us.")
+
+    def remove_from_bench(self, key: str) -> None:
+        if key not in self.bench:
+            return
+        self.bench.remove(key)
+        self.bench_pending.pop(self.found[key].target.channel, None)
+        if key in self.bench_buzz_queue:
+            self.bench_buzz_queue.remove(key)
+        held = self._bench_powered(key)
+        self._refresh_bench()
+        self._say(f"{self._bench_name(key)} is off the bench" + (
+            " (still holding where it is; Disarm releases it)." if held else "."))
+
+    def _drag_press(self, key: str, source: str, event: Any) -> None:
+        self._drag = {"key": key, "source": source, "x": event.x_root, "y": event.y_root, "moved": False}
+
+    def _drag_motion(self, event: Any) -> None:
+        drag = self._drag
+        if drag is None:
+            return
+        if not drag["moved"] and abs(event.x_root - drag["x"]) + abs(event.y_root - drag["y"]) < 8:
+            return
+        drag["moved"] = True
+        if self._ghost is None:
+            self._ghost = tk.Label(self.root, text=self._bench_name(drag["key"]), background=theme.ACCENT,
+                                   foreground=theme.ON_ACCENT, font=theme.FONT_BOLD, padx=10, pady=4)
+        self._ghost.place(x=event.x_root - self.root.winfo_rootx() + 12,
+                          y=event.y_root - self.root.winfo_rooty() + 12)
+        self._ghost.lift()
+
+    def _drag_release(self, event: Any) -> None:
+        drag, self._drag = self._drag, None
+        if self._ghost is not None:
+            self._ghost.destroy()
+            self._ghost = None
+        if drag is None:
+            return
+        if not drag["moved"]:
+            if drag["source"] == "tile":
+                self.toggle_bench(drag["key"])  # a plain click works without dragging
+            return
+        over = self._over_bench(event.x_root, event.y_root)
+        if drag["source"] == "tile" and over:
+            self.add_to_bench(drag["key"])
+        elif drag["source"] == "bench" and not over:
+            self.remove_from_bench(drag["key"])
+
+    def _over_bench(self, x_root: int, y_root: int) -> bool:
+        zone = self.bench_zone
+        x, y = x_root - zone.winfo_rootx(), y_root - zone.winfo_rooty()
+        return 0 <= x < max(zone.winfo_width(), 1) and 0 <= y < max(zone.winfo_height(), 1)
+
+    def _draggable(self, widgets: list[tk.Misc], key: str, source: str) -> None:
+        for widget in widgets:
+            widget.bind("<ButtonPress-1>", lambda e, k=key, s=source: self._drag_press(k, s, e))
+            widget.bind("<B1-Motion>", self._drag_motion)
+            widget.bind("<ButtonRelease-1>", self._drag_release)
+
+    def _build_tile(self, key: str) -> dict[str, Any]:
+        frame = tk.Frame(self.tiles_box, background=theme.SURFACE, highlightthickness=2,
+                         highlightbackground=theme.BORDER, padx=10, pady=6, cursor="hand2")
+        frame.pack(fill="x", pady=(0, 6))
+        name = tk.Label(frame, text=self._bench_name(key), font=theme.FONT_BOLD, background=theme.SURFACE,
+                        foreground=theme.TEXT, anchor="w", cursor="hand2")
+        name.pack(fill="x")
+        where = tk.Label(frame, background=theme.SURFACE, foreground=theme.MUTED, anchor="w", cursor="hand2",
+                         font=theme.FONT)
+        where.pack(fill="x")
+        self._draggable([frame, name, where], key, "tile")
+        return {"frame": frame, "name": name, "where": where}
+
+    def _build_bench_row(self, key: str) -> dict[str, Any]:
+        found = self.found[key]
+        frame = ttk.LabelFrame(self.bench_frame, text=f"{self._bench_name(key)}  ({found.target.key})",
+                               padding=(10, 6))
+        frame.columnconfigure(0, weight=1)
+        top = ttk.Frame(frame)
+        top.grid(row=0, column=0, sticky="ew")
+        handle = tk.Label(top, text="⠿ drag off to remove", background=theme.BG, foreground=theme.MUTED,
+                          font=theme.FONT, cursor="fleur")
+        handle.pack(side="left", padx=(0, 10))
+        self._draggable([handle], key, "bench")
+        invert = tk.BooleanVar(value=self.bench_invert.get(key, False))
+        invert.trace_add("write", lambda *_, k=key, v=invert: self.bench_invert.__setitem__(k, bool(v.get())))
+        ttk.Checkbutton(top, text="Invert", variable=invert).pack(side="left", padx=(0, 8))
+        buzz = ttk.Button(top, text="Buzz", command=lambda k=key: self.bench_buzz(k))
+        use = ttk.Button(top, text="Use as start", command=lambda k=key: self.bench_use_as_start(k))
+        widen = ttk.Button(top, text="Widen", command=lambda k=key: self.bench_widen(k))
+        narrow = ttk.Button(top, text="Narrow", command=lambda k=key: self.bench_narrow(k))
+        remove = ttk.Button(top, text="✕", width=3, command=lambda k=key: self.remove_from_bench(k))
+        for widget in (buzz, use, widen, narrow, remove):
+            widget.pack(side="left", padx=(0, 6))
+        model = self._bench_rom(key)
+        low, high = model.slider_range()
+        var = tk.DoubleVar(value=0)  # 0 at the start pulse, like step 4
+        scale = tk.Scale(frame, from_=low - model.center, to=high - model.center, orient="horizontal", resolution=1,
+                         showvalue=True, variable=var, label=f"us from start ({model.center} us)",
+                         background=theme.BG, foreground=theme.TEXT, troughcolor=theme.SURFACE_HI,
+                         activebackground=theme.ACCENT, highlightthickness=0, borderwidth=0, sliderrelief="flat",
+                         font=theme.FONT)
+        scale.grid(row=1, column=0, sticky="ew")
+        info = ttk.Label(frame)
+        info.grid(row=2, column=0, sticky="w", pady=(2, 0))
+        row = {"frame": frame, "var": var, "scale": scale, "info": info, "invert": invert, "buzz": buzz,
+               "use": use, "widen": widen, "narrow": narrow}
+        var.trace_add("write", lambda *_, k=key: self._bench_slider(k))
+        return row
+
+    def _refresh_bench(self) -> None:
+        if not hasattr(self, "bench_zone") or self._closed:
+            return
+        servos = self._bench_servos()
+        self.bench = [key for key in self.bench if key in servos]
+        if list(servos) != list(self.bench_tiles):
+            for tile in self.bench_tiles.values():
+                tile["frame"].destroy()
+            self.bench_tiles = {key: self._build_tile(key) for key in servos}
+        for key in [k for k in self.bench_rows if k not in self.bench]:
+            self.bench_rows.pop(key)["frame"].destroy()
+        for index, key in enumerate(self.bench):
+            if key not in self.bench_rows:
+                self.bench_rows[key] = self._build_bench_row(key)
+            self.bench_rows[key]["frame"].grid(row=index, column=0, sticky="ew", padx=2, pady=4)
+        if servos:
+            self.no_tiles.pack_forget()
+        else:
+            self.no_tiles.pack(anchor="w")
+        if self.bench:
+            self.bench_empty.grid_remove()
+        else:
+            self.bench_empty.grid()
+
+        ready = self.armed and self.wiggle is None
+        powered = {key: self._bench_powered(key) for key in servos}
+        for key, tile in self.bench_tiles.items():
+            channel = servos[key].target.channel
+            pulse = self.controller.position(channel) if powered[key] else None
+            where = f"{pulse} us" if pulse is not None else "off"
+            on = key in self.bench
+            tile["name"].configure(text=self._bench_name(key), foreground=theme.ACCENT if on else theme.TEXT)
+            tile["where"].configure(text=f"{servos[key].target.key}  ·  {where}" + ("  ·  on bench" if on else ""))
+            tile["frame"].configure(highlightbackground=theme.ACCENT if on else theme.BORDER)
+        for key, row in self.bench_rows.items():
+            model = self._bench_rom(key)
+            low, high = model.slider_range()
+            start = model.center
+            if not powered[key] and float(row["var"].get() or 0) != 0:
+                row["var"].set(0)  # released: it starts at its start pulse again
+            if int(float(row["scale"].cget("from"))) != low - start or int(float(row["scale"].cget("to"))) != high - start:
+                row["scale"].configure(from_=low - start, to=high - start)
+            row["scale"].configure(label=f"us from start ({start} us)",
+                                   state="normal" if powered[key] and ready else "disabled")
+            if powered[key]:
+                pulse = self.controller.position(model.channel)
+                text = f"at {pulse} us   target {self._bench_target(key)} us   allowed {low}..{high} us"
+            else:
+                text = f"off: Power up starts it at {start} us   allowed {low}..{high} us"
+            row["info"].configure(text=text)
+            row["buzz"].state(["!disabled"] if ready else ["disabled"])
+            row["use"].state(["!disabled"] if ready and powered[key] else ["disabled"])
+            row["widen"].state(["!disabled"] if model.can_widen() else ["disabled"])
+            row["narrow"].state(["!disabled"] if not model.complete and model.band_half_us > MIN_BAND_HALF_US
+                                else ["disabled"])
+        any_on = any(powered[key] for key in self.bench)
+        if not any_on and self.group_var.get() != 0:
+            self._group_last = 0.0
+            self.group_var.set(0)
+        half = max([self._bench_rom(key).band_half_us for key in self.bench] + [DEFAULT_BAND_HALF_US])
+        if int(float(self.group_scale.cget("to"))) != half:
+            self.group_scale.configure(from_=-half, to=half)
+        self.group_scale.configure(state="normal" if any_on and ready else "disabled")
+        self.bench_power_btn.state(["!disabled"] if ready and any(not powered[k] for k in self.bench)
+                                   else ["disabled"])
+        self.bench_buzz_all_btn.state(["!disabled"] if ready and self.bench else ["disabled"])
+        self.bench_zero_btn.state(["!disabled"] if ready and any_on else ["disabled"])
+
+    # -- output
+    def _bench_push_band(self, key: str) -> None:
+        """LIMIT: start +/- band (never excluding where it is held), firmware slew cap."""
+        model = self._bench_rom(key)
+        if self._bench_in_session(model.channel):
+            self.session._push_band(model)
+            return
+        low, high = model.slider_range()
+        held = self.controller.position(model.channel)
+        if held is not None:
+            low, high = min(low, held), max(high, held)
+        self.controller.set_limits(model.channel, low, high, neutral_us=min(max(model.center, low), high),
+                                   slew_us_s=DEFAULT_FIRMWARE_SLEW_US_S)
+
+    def bench_power_up(self, keys: list[str] | None = None) -> bool:
+        """First output on bench servos, at their start pulse, after one confirmation."""
+        if not self._bench_ready():
+            return False
+        keys = list(self.bench if keys is None else keys)
+        off = [key for key in keys if not self._bench_powered(key)]
+        if not off:
+            return True
+        names = ", ".join(f"{self._bench_name(k)} at {self._bench_rom(k).center} us" for k in off)
+        text = f"{self.ZERO_WARNING}\n\nThis powers up {names} and holds them there."
+        if self.ask_fn("Power up bench servos", text, ["Power up", "Cancel"]) != "Power up":
+            self._say("Nothing moved.")
+            return False
+        for key in off:
+            model = self._bench_rom(key)
+            if key in self.bench_rows:
+                self.bench_rows[key]["var"].set(0)
+            try:
+                if self._bench_in_session(model.channel):
+                    self.rows[model.channel]["start_var"].set(str(model.center))
+                    self._enable_channel(model.channel, model.center)
+                else:
+                    self._bench_push_band(key)
+                    self.controller.start(model.channel, model.center)
+            except Exception as error:  # noqa: BLE001
+                self._bench_error(key, error)
+                return False
+        self._refresh_bench()
+        self._say(f"Holding {', '.join(self._bench_name(k) for k in off)}. Drag a slider; it follows slowly. "
+                  "Disarm or E-STOP releases them.")
+        return True
+
+    def _bench_slider(self, key: str) -> None:
+        if key not in self.bench_rows or not self._bench_powered(key):
+            return
+        target = self._bench_target(key)
+        channel = self.found[key].target.channel
+        if self._bench_in_session(channel):
+            row = self.rows[channel]
+            row["var"].set(target - row["zero"])  # step 4's row follows; its session slews the servo
+        else:
+            self.bench_pending[channel] = target  # sent by the next tick; the firmware slews to it
+        self._refresh_bench()
+
+    def _group_moved(self) -> None:
+        try:
+            value = float(self.group_var.get())
+        except (ValueError, tk.TclError):
+            return
+        delta, self._group_last = value - self._group_last, value
+        if not delta:
+            return
+        for key in self.bench:
+            if key not in self.bench_rows or not self._bench_powered(key):
+                continue
+            model = self._bench_rom(key)
+            low, high = model.slider_range()
+            var = self.bench_rows[key]["var"]
+            sign = -1 if self.bench_invert.get(key) else 1
+            var.set(min(max(float(var.get()) + sign * delta, low - model.center), high - model.center))
+
+    def _bench_back_to_zero(self) -> None:
+        self._group_last = 0.0
+        self.group_var.set(0)
+        for key, row in self.bench_rows.items():
+            row["var"].set(0)
+
+    def bench_back_to_zero(self) -> None:
+        """Every bench servo back to its start pulse (slowly)."""
+        if not self._bench_ready():
+            return
+        self._bench_back_to_zero()
+        self._say("Moving the bench servos back to their start (0).")
+
+    def _bench_send(self) -> None:
+        pending, self.bench_pending = self.bench_pending, {}
+        for channel, target in pending.items():
+            position = self.controller.position(channel)
+            if position is not None and position != target:
+                self.controller.move(channel, target)
+
+    def bench_use_as_start(self, key: str) -> None:
+        """This servo's start pulse becomes where it is now; step 4 starts it here."""
+        if not self._bench_ready() or not self._bench_powered(key):
+            return
+        found = self.found[key]
+        channel = found.target.channel
+        in_session = self._bench_in_session(channel)
+        pulse = (self.session.targets[channel] if in_session
+                 else self.bench_pending.pop(channel, None) or self.controller.position(channel))
+        try:
+            if not in_session and self.controller.position(channel) != pulse:
+                self.controller.move(channel, pulse)
+            if channel in self.roms:
+                rom = self.roms[channel]
+                rom.set_start(pulse, "operator")
+                self.rows[channel]["start_var"].set(str(pulse))
+                if self._enabled(channel):
+                    self.session._push_band(rom)
+                    row = self.rows[channel]
+                    row["zero"] = pulse
+                    row["scale"].configure(label=f"us from start ({pulse} us)")
+                    self._refresh_row(channel)
+                    row["var"].set(0)
+            found.start_us = pulse
+            if not in_session:
+                self._bench_rom(key).set_start(pulse)
+                self._bench_push_band(key)  # band re-centred on the new start
+        except Exception as error:  # noqa: BLE001
+            self._bench_error(key, error)
+            return
+        self.bench_rows[key]["var"].set(0)
+        self._refresh_bench()
+        self._say(f"{self._bench_name(key)}: start is now {pulse} us (slider 0). Range of motion starts it here.")
+
+    def bench_widen(self, key: str) -> None:
+        self._bench_band(key, widen=True)
+
+    def bench_narrow(self, key: str) -> None:
+        self._bench_band(key, widen=False)
+
+    def _bench_band(self, key: str, *, widen: bool) -> None:
+        channel = self.found[key].target.channel
+        if self._bench_in_session(channel):
+            (self.widen if widen else self.narrow)(channel)
+            self._refresh_bench()
+            return
+        model = self._bench_rom(key)
+        try:
+            held = self.controller.position(channel) if self._bench_powered(key) else None
+            low, high = model.widen() if widen else model.narrow(keep_inside=held)
+            if held is not None:
+                self._bench_push_band(key)
+        except Exception as error:  # noqa: BLE001
+            self._bench_error(key, error)
+            return
+        self._refresh_bench()
+        self._say(f"{self._bench_name(key)}: allowed band {'widened' if widen else 'narrowed'} to {low}..{high} us.")
+
+    def bench_buzz(self, key: str) -> None:
+        if not self._bench_ready():
+            return
+        if not self._bench_powered(key) and not self.bench_power_up([key]):
+            return
+        self.bench_buzz_queue = [key]
+        self._bench_try_buzz()
+
+    def bench_buzz_all(self) -> None:
+        if not self._bench_ready():
+            return
+        if not self.bench:
+            self._say("Put servos on the bench first.", error=True)
+            return
+        if not self.bench_power_up(self.bench):
+            return
+        self.bench_buzz_queue = list(self.bench)
+        self._bench_try_buzz()
+
+    def _bench_try_buzz(self) -> None:
+        try:
+            self._bench_next_buzz()
+        except Exception as error:  # noqa: BLE001
+            key = self._bench_buzz or (self.bench_buzz_queue[0] if self.bench_buzz_queue else None)
+            if key is None:
+                self._fault_or_say(error)
+            else:
+                self._bench_error(key, error)
+
+    def _bench_next_buzz(self) -> None:
+        """Start the next queued buzz once that servo has stopped moving (one at a time)."""
+        while self.bench_buzz_queue and self.wiggle is None:
+            key = self.bench_buzz_queue[0]
+            if key not in self.bench or not self._bench_powered(key):
+                self.bench_buzz_queue.pop(0)
+                continue
+            found = self.found[key]
+            channel = found.target.channel
+            if channel in self.bench_pending:
+                self._bench_send()
+                return
+            state = self.controller.status(channel)
+            pulse = self.controller.position(channel)
+            if state["current_us"] != pulse or state["target_us"] != pulse:
+                return  # still moving: the next tick tries again
+            self.bench_buzz_queue.pop(0)
+            low, high = self._bench_rom(key).slider_range()
+            delta = min(find.DEFAULT_DELTA_US, pulse - low, high - pulse)
+            if delta < 10:
+                self._say(f"{self._bench_name(key)} is at the edge of its band: move it inward to buzz it.",
+                          error=True)
+                continue
+            self.wiggle = find.Wiggle(self.controller, found.target, pulse, delta, self.wiggle_slew_us_s,
+                                      release=False)
+            self._bench_buzz = key
+            self.wiggle.begin()
+            self._say(f"{self._bench_name(key)}: buzzing.")
+            self._refresh_identify()
+            self._refresh_bench()
+            return
+
+    def _bench_buzz_done(self) -> None:
+        key, self._bench_buzz = self._bench_buzz, None
+        if key in self.found and self.armed:
+            self._bench_push_band(key)  # back to its own band and slew after the quick buzz
+        self._say(f"{self._bench_name(key)} buzzed." + (" Next..." if self.bench_buzz_queue else ""))
+        self._refresh_identify()
+        self._refresh_bench()
+
     def go_to_rom(self, path: Path | None = None) -> None:
         """Save the map, release everything and show only the named servos for range of motion."""
         if self.wiggle is not None:
             return
+        # A servo that is holding (bench, Set all to 0) starts step 4 where it is: no snap on Enable.
+        if self.armed:
+            for found in self.found.values():
+                held = self.controller.position(found.target.channel) if found.kind == "servo" else None
+                if held is not None:
+                    found.start_us = held
         target = path or self._found_path or self._default_map_path()
         if self.save_found_map(target) is None:
             return
@@ -1151,7 +1735,7 @@ class RomApp:
         if self.armed:
             self.disarm()
         self.load_map_file(saved)
-        self.steps.select(2)
+        self.steps.select(3)
         if not self.roms:
             self._say(f"Saved to {saved}. No servos were named, so there is nothing to range.", error=True)
             return
@@ -1168,18 +1752,21 @@ class RomApp:
         if start is None:
             self._say(f"ch {channel}: enter a start pulse in us.", error=True)
             return
-        rom = self.roms[channel]
         try:
-            self.session.enable(channel, None if start == rom.start_us else start)
+            self._enable_channel(channel, start)
         except Exception as error:  # noqa: BLE001
             self._fault_or_say(error)
             return
+        self._say(f"ch {channel}: output on at {start} us (slider 0). Drag the slider; the servo follows slowly.")
+
+    def _enable_channel(self, channel: int, start: int) -> None:
+        rom = self.roms[channel]
+        self.session.enable(channel, None if start == rom.start_us else start)
         row = self.rows[channel]
         row["zero"] = start
         row["scale"].configure(label=f"us from start ({start} us)")
         self._refresh_row(channel)
         row["var"].set(0)
-        self._say(f"ch {channel}: output on at {start} us (slider 0). Drag the slider; the servo follows slowly.")
 
     def _var_changed(self, channel: int, var: tk.DoubleVar) -> None:
         try:
@@ -1253,6 +1840,7 @@ class RomApp:
             return
         self.wiggle = None
         self.last_action = ""
+        self._bench_stop_activity()
         try:
             if self.session is not None and self.session.started:
                 self.session.estop()
@@ -1284,6 +1872,7 @@ class RomApp:
     def disarm(self) -> None:
         self.wiggle = None
         self.last_action = ""
+        self._bench_stop_activity()
         if self.session is not None or self.armed:
             try:
                 if self.session is not None:
@@ -1352,6 +1941,7 @@ class RomApp:
         self._say(f"Controller error: {error}. Stopping.", error=True)
         self.wiggle = None
         self.last_action = ""
+        self._bench_stop_activity()
         try:
             if self.session is not None:
                 self.session._remember_positions()
@@ -1368,6 +1958,7 @@ class RomApp:
 
     def _drop_connection(self) -> None:
         controller, self.controller = self.controller, None
+        self._bench_stop_activity()
         if self.session is not None:
             self.session.started = False
             self.session.enabled.clear()
@@ -1385,14 +1976,22 @@ class RomApp:
         if not self.armed:
             return
         try:
-            moved = self.session.step(dt_s) if self._rom_started() else {}
+            # a buzz drives its channel itself: the ROM session waits for it
+            moved = self.session.step(dt_s) if self._rom_started() and self.wiggle is None else {}
             if self.wiggle is not None:
                 if self.wiggle.step():
                     self.wiggle = None
-                    self._say("What happened? Pick one below.")
-                    self._refresh_identify()
-            elif not self._rom_started():
-                self.controller.heartbeat()
+                    if self._bench_buzz is not None:
+                        self._bench_buzz_done()
+                    else:
+                        self._say("What happened? Pick one below.")
+                        self._refresh_identify()
+            else:
+                self._bench_send()
+                if self.bench_buzz_queue:
+                    self._bench_next_buzz()
+                if not self._rom_started():
+                    self.controller.heartbeat()
         except Exception as error:  # noqa: BLE001
             if self.wiggle is not None:
                 self._probe_error(error)
@@ -1401,6 +2000,8 @@ class RomApp:
             return
         for channel in moved:
             self._refresh_row(channel)
+        if self._watch_ticks % 4 == 0 and self.bench_rows:
+            self._refresh_bench()
 
     def _timer(self) -> None:
         if self._closed:

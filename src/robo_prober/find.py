@@ -153,18 +153,19 @@ class Wiggle:
     small band keeps the fast swing safe: the firmware clamps to it.
     Call ``step()`` repeatedly (a GUI timer, or ``run()``): it waits for the
     firmware to reach each target (STATUS), feeding the watchdog meanwhile.
-    A GPIO is released when the wiggle is done; a PCA9685 channel stays
-    held at its start pulse until DISARM.
+    A GPIO is released when the wiggle is done (unless ``release=False``); a
+    PCA9685 channel stays held at its start pulse until DISARM.
     """
 
     def __init__(self, ctl, target: Target, start_us: int = DEFAULT_START_US, delta_us: int = DEFAULT_DELTA_US,
-                 slew_us_s: int = DEFAULT_WIGGLE_SLEW_US_S):
+                 slew_us_s: int = DEFAULT_WIGGLE_SLEW_US_S, release: bool = True):
         if not 1 <= delta_us <= 400:
             raise ValueError("wiggle delta must be 1..400 us")
         if not ABS_MIN_US <= start_us - delta_us or not start_us + delta_us <= ABS_MAX_US:
             raise ValueError(f"start +/- delta must stay inside {ABS_MIN_US}..{ABS_MAX_US} us")
         self.ctl, self.target = ctl, target
         self.start_us, self.delta_us, self.slew_us_s = start_us, delta_us, slew_us_s
+        self.release = release  # False: keep holding the start pulse after the buzz (the bench)
         self.steps: list[int] = []
         self.done = False
 
@@ -193,7 +194,7 @@ class Wiggle:
         if self.steps:
             self.ctl.move(ch, self.steps.pop(0))
             return False
-        if self.target.pin is not None:
+        if self.target.pin is not None and self.release:
             self.ctl.release_pin(self.target.pin)
         self.done = True
         return True
