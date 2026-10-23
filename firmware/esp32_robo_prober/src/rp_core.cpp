@@ -173,6 +173,12 @@ void Core::releaseAll(Fault reason) {
   token_[0] = '\0';
   for (int i = 0; i < kChannels; ++i) {
     ChannelState &c = channels_[i];
+    // A band lives for one armed session: the next session must send its
+    // own LIMIT, or it gets the conservative default band.
+    c.min_us = kDefaultMinUs;
+    c.neutral_us = kDefaultNeutralUs;
+    c.max_us = kDefaultMaxUs;
+    c.slew_us_s = kDefaultSlewUsPerS;
     c.active = false;
     c.current_us = 0;
     c.target_us = 0;

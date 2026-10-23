@@ -233,6 +233,20 @@ SCENARIOS = {
         ("STATUS channel=5", has("active=0")),
         (move(0, 1550, 3), err("disarmed")), ("DISARM extra=1", err("bad_fields")),
     ],
+    "release_restores_default_band": [
+        ("LIMIT channel=2 min_us=1000 neutral_us=1500 max_us=2000", has("RP1 OK")),
+        (ARM, ANY), (start(2, 1900), has("RP1 OK")), ("DISARM", ANY),
+        ("STATUS channel=2", has("min_us=1400", "max_us=1600")),
+        (ARM, ANY), (start(2, 1900), err("out_of_limits")),   # widened band did not survive
+        ("STOP", ANY),
+        ("LIMIT channel=2 min_us=1000 neutral_us=1500 max_us=2000", has("RP1 OK")),
+        (ARM, ANY), (start(2, 1500), ANY), ("@ESTOP_PIN", ANY),
+        ("STATUS channel=2", has("min_us=1400", "max_us=1600")),
+        ("ESTOP_CLEAR cutoff=confirmed", ANY),
+        ("LIMIT channel=2 min_us=1000 neutral_us=1500 max_us=2000", has("RP1 OK")),
+        (ARM, ANY), (tick(5000), ANY),                           # watchdog
+        ("STATUS channel=2", has("min_us=1400", "max_us=1600")),
+    ],
     "driver_fault": [
         (ARM, ANY), ("@DRIVER fail", ANY), (start(0, 1550), err("driver_error")),
         ("HELLO", has("mode=disarmed", "fault=driver")),

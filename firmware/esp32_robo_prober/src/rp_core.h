@@ -12,7 +12,8 @@
 //     conservative +/-100 us around 1500 us; the host can set another band
 //     with LIMIT (on a driven channel only if its position is inside the new
 //     band). Targets outside the band are rejected, and the written pulse is
-//     clamped to the band as a second guard.
+//     clamped to the band as a second guard. Every release (DISARM, STOP,
+//     ESTOP, watchdog, driver error) restores the default band.
 //   * A channel outputs nothing until the host sends START with an explicit
 //     start pulse; MOVE then slews toward each target at no more than
 //     slew_us_s. The firmware never picks a start pulse itself.

@@ -110,7 +110,9 @@ def test_probe_hands_permission_band_to_v02_firmware_and_settles():
     assert events[3]["pulse_us"] == 1500 and events[6]["pulse_us"] == 1490  # approved neutral, explicitly
     assert events[4]["settled_us"] == 1520 and events[5]["settled_us"] == 1500
     assert device.write_log[0] == (0, 1500)  # first PWM is exactly the start pulse
-    assert (device.channels[1].min_us, device.channels[1].max_us) == (1450, 1530)
+    assert events[2]["response"]["min_us"] == "1450" and events[2]["response"]["max_us"] == "1530"
+    # DISARM ends the session, so the band falls back to the default
+    assert (device.channels[1].min_us, device.channels[1].max_us) == (1400, 1600)
     assert device.armed is False and device.output(0) is None
 
 

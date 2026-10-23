@@ -19,7 +19,8 @@ All notable changes to this project are documented here. The format follows
   ESP32 and ESP32-S3 (PlatformIO and Arduino IDE). Outputs are off at boot,
   `ARM` needs `cutoff=confirmed` and a session token that every `MOVE` and
   `HB` must carry, each channel has a pulse band (default 1400/1500/1600 µs)
-  that the firmware rejects and clamps against, moves are slew limited, a
+  that the firmware rejects and clamps against (any release restores the
+  default band, so a widened band never outlives its session), moves are slew limited, a
   heartbeat watchdog releases all outputs when the host goes quiet, `STOP`,
   `DISARM` and a latching `ESTOP` (plus an optional hardware e-stop input)
   release everything, and malformed input never moves anything. No channel

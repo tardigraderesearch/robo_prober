@@ -137,6 +137,9 @@ class ReferenceDevice:
         self.armed = False
         self.token = ""
         for state in self.channels:
+            # A band lives for one armed session (matches the firmware).
+            state.min_us, state.neutral_us = DEFAULT_MIN_US, DEFAULT_NEUTRAL_US
+            state.max_us, state.slew_us_s = DEFAULT_MAX_US, DEFAULT_SLEW_US_S
             state.active = False
             state.current_us = 0
             state.target_us = 0
