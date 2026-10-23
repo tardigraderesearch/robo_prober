@@ -147,3 +147,14 @@ def test_faulty_servo_is_a_device_never_a_joint_and_rom_refuses_it(setup):
         set_rom(hw, 2, 1400, 1600, set_by="test")
     with pytest.raises(ValueError, match="no working servo"):
         build_map(ctl.info, survey, found[1:])
+
+
+def test_servo_type_goes_into_the_map_and_sets_the_starting_band(setup):
+    ctl, _ = setup
+    survey = discover(ctl)
+    hw = build_map(ctl.info, survey, [Found(Target(4), "servo", "pitch", 1500, servo_id="corona-ds-929mg"),
+                                      Found(Target(5), "servo", "yaw", 1500, servo_id="no-such-servo")])
+    assert hw["joints"]["pitch"]["servo_type"]["safe_start_us"] == [1180, 1820]
+    assert "servo_type" not in hw["joints"]["yaw"]                 # unknown id: just the default band
+    bands = {r.label: r.band for r in channels_from_map(hw)}
+    assert bands == {"pitch": (1180, 1820), "yaw": (1200, 1800)}

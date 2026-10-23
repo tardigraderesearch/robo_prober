@@ -104,6 +104,21 @@ class Found:
     name: str = ""
     start_us: int | None = None
     note: str = ""
+    servo_id: str = ""          # servo_db id the operator picked (optional)
+
+
+def servo_type(servo_id: str) -> dict[str, Any] | None:
+    """The map's ``servo_type`` block for a servo_db id: model and safe start band."""
+    from . import servo_db
+
+    if not servo_id:
+        return None
+    try:
+        entry = servo_db.get(servo_id)
+    except KeyError:
+        return None
+    low, high = servo_db.safe_pulse_range(entry)
+    return {"id": entry["id"], "model": f"{entry['brand']} {entry['model']}", "safe_start_us": [low, high]}
 
 
 def _split(text: str | None) -> list[str]:
@@ -265,6 +280,9 @@ def build_map(info: dict[str, str], survey: Survey, found: list[Found]) -> dict[
             }
             if target.pin is not None:
                 joints[name]["pin"] = target.pin
+            typed = servo_type(item.servo_id)
+            if typed is not None:
+                joints[name]["servo_type"] = typed
         elif item.kind == "faulty":
             # Never a joint: nothing downstream may try to hold a position with it.
             devices[name] = {"kind": "faulty_servo", "pin": target.pin, "channel": target.channel,
@@ -303,4 +321,4 @@ def build_map(info: dict[str, str], survey: Survey, found: list[Found]) -> dict[
 
 
 __all__ = ["DEFAULT_DELTA_US", "DEFAULT_START_US", "FAULTY_NOTE", "Found", "PinInfo", "Survey", "Target", "Wiggle", "blink",
-           "build_map", "channel_name", "discover", "safe_name", "targets"]
+           "build_map", "servo_type", "channel_name", "discover", "safe_name", "targets"]

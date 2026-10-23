@@ -125,6 +125,13 @@ def validate_map(data: dict[str, Any]) -> None:
     for joint, values in joints.items():
         if "rom" in values:
             validate_rom(joint, values["rom"])
+        if "servo_type" in values:
+            servo = values["servo_type"]
+            safe = servo.get("safe_start_us") if isinstance(servo, dict) else None
+            if not isinstance(servo, dict) or not servo.get("id") or not (
+                    isinstance(safe, list) and len(safe) == 2 and all(type(v) is int and 500 <= v <= 2500 for v in safe)
+                    and safe[0] < safe[1]):
+                raise MapValidationError(f"joint {joint}: servo_type needs id and safe_start_us [low, high] in 500..2500")
         if "last_position" in values:
             last = values["last_position"]
             pulse = last.get("pulse_us") if isinstance(last, dict) else None

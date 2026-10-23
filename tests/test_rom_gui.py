@@ -638,3 +638,56 @@ def test_identify_one_way_only_marks_faulty_and_bench_and_rom_skip_it(tmp_path):
         assert app.faulty_rows.winfo_manager() == "grid"
     finally:
         app.close()
+
+
+def test_identify_servo_type_typeahead_and_twenty_questions(tmp_path):
+    from robo_prober import servo_db
+    from robo_prober.rom_gui import RomApp
+
+    root = _fw_root()
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    try:
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        app.discover()
+        a, b = [t for t in app._identify_targets() if t.pin is not None][:2]
+        app.root.update()
+        # type-ahead
+        app.jump_to(a.key)
+        assert app.type_line.winfo_manager() == ""                   # only after Y
+        app.answer("servo")
+        app.root.update()
+        assert app.type_line.winfo_manager() == "pack"
+        app.servo_var.set("ds-929")
+        app._servo_typed()
+        assert "Corona DS-929MG" in app.servo_box.cget("values")
+        app.servo_var.set("Corona DS-929MG")
+        app._servo_selected()
+        assert app.servo_choice["id"] == "corona-ds-929mg" and "1180..1820" in app.servo_info.cget("text")
+        app.name_var.set("pitch")
+        app.save_name()
+        assert app.found[a.key].servo_id == "corona-ds-929mg" and app.servo_choice is None
+
+        # 20 questions in a dialog
+        app.jump_to(b.key)
+        app.answer("servo")
+        app.open_servo_identifier()
+        assert app.ident_dialog is not None and app.ident_current is not None
+        before = len(app.identifier.candidates)
+        app.ident_answer(app.ident_current.options[0])
+        assert len(app.identifier.candidates) < before
+        app.ident_answer(servo_db.UNKNOWN)                         # "Don't know" never narrows
+        pick = app.identifier.ranked()[0]
+        app.ident_pick(pick)
+        assert app.ident_dialog is None and app.servo_choice["id"] == pick["id"]
+        app.name_var.set("yaw")
+        app.save_name()
+        assert app.found[b.key].servo_id == pick["id"]
+
+        # the bench and range of motion start inside that servo's safe band
+        assert app._bench_rom(a.key).band == (1180, 1820)
+        app.go_to_rom(tmp_path / "t.map.json")
+        assert app.roms[a.channel].band == (1180, 1820)
+        assert app.hardware_map["joints"]["pitch"]["servo_type"]["id"] == "corona-ds-929mg"
+    finally:
+        app.close()

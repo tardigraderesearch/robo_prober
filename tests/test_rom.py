@@ -350,3 +350,31 @@ def test_narrow_shrinks_band_but_never_past_held_position():
     rom2 = RomChannel(channel=4, label="x")
     rom2.narrow(1000, keep_inside=rom2.center + 150)
     assert rom2.band_half_us == 150          # the held position stays inside, so the firmware accepts it
+
+
+def test_servo_type_safe_band_replaces_the_symmetric_band():
+    rom = RomChannel(3, "pitch", 1500, 300, safe_us=(1180, 1820))
+    assert rom.band == (1180, 1820) and rom.half_span == 320
+    assert rom.narrow() == (1280, 1720)
+    assert rom.narrow(keep_inside=1300) == (1300, 1620)          # never past a held position
+    assert rom.widen() == (1100, 1820)
+    rom.set_start(1000)
+    assert rom.band == (1000, 1820)                                # always includes the start
+    rom2 = RomChannel(3, "pitch", 1500, 300, safe_us=(1450, 1550))
+    for _ in range(5):
+        rom2.narrow()
+    assert rom2.band == (1475, 1525) and not rom2.can_narrow()
+    with pytest.raises(RomError):
+        RomChannel(3, safe_us=(1600, 1400))
+
+
+def test_map_servo_type_sets_the_starting_band(demo_map):
+    hw = json.loads(json.dumps(demo_map))
+    joint = next(iter(hw["joints"].values()))
+    joint["servo_type"] = {"id": "corona-ds-929mg", "model": "Corona DS-929MG", "safe_start_us": [1180, 1820]}
+    validate_map(hw)
+    rom = next(r for r in channels_from_map(hw) if r.channel == joint["channel"])
+    assert rom.safe_us == (1180, 1820)
+    joint["servo_type"]["safe_start_us"] = [1900, 1100]
+    with pytest.raises(MapValidationError, match="servo_type"):
+        validate_map(hw)

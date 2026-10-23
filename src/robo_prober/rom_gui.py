@@ -25,11 +25,10 @@ import re
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from . import __version__, find, flasher, theme
+from . import __version__, find, flasher, servo_db, theme
 from .api import EMULATOR_PORT, Controller, connect, discover, load_map, save_map
 from .transport import FirmwareOutdated, ProtocolError
 from .rom import (
-    MIN_BAND_HALF_US,
     ABS_MAX_US,
     ABS_MIN_US,
     DEFAULT_BAND_HALF_US,
@@ -137,6 +136,12 @@ class RomApp:
         self.start_var = tk.StringVar(value=str(find.DEFAULT_START_US))
         self.delta_var = tk.StringVar(value=str(find.DEFAULT_DELTA_US))
         self.name_var = tk.StringVar()
+        self.servo_var = tk.StringVar()                       # servo type: type-ahead text
+        self.servo_choice: dict[str, Any] | None = None       # the servo_db entry picked for this target
+        self._servo_hits: list[dict[str, Any]] = []
+        self.identifier: servo_db.Identifier | None = None    # "Don't know? Identify it" dialog state
+        self.ident_dialog: tk.Toplevel | None = None
+        self.ident_current: servo_db.Question | None = None
         self.survey_var = tk.StringVar(value="Not discovered yet. Press Discover: it only reads the pins.")
         self.target_var = tk.StringVar(value="Discover first.")
         self.group_var = tk.DoubleVar(value=0)
@@ -308,7 +313,8 @@ class RomApp:
 
         def key(action):
             def handler(event):
-                if self.steps.index("current") != 1 or event.widget is self.name_entry:
+                # typing in a field (name, servo type, start) never answers
+                if self.steps.index("current") != 1 or isinstance(event.widget, (ttk.Entry, tk.Entry)):
                     return None
                 action()
                 return "break"
@@ -328,11 +334,25 @@ class RomApp:
             ttk.Button(self.answer_row, text=text, command=lambda k=kind: self.answer(k)).pack(side="left", padx=(0, 6))
         self.name_row = ttk.Frame(tab)
         self.name_row.grid(row=4, column=0, sticky="w", pady=(8, 0))
-        ttk.Label(self.name_row, text="What is it?", style="Big.TLabel").pack(side="left", padx=(0, 8))
-        self.name_entry = ttk.Entry(self.name_row, textvariable=self.name_var, width=24)
+        line = ttk.Frame(self.name_row)
+        line.pack(anchor="w")
+        ttk.Label(line, text="What is it?", style="Big.TLabel").pack(side="left", padx=(0, 8))
+        self.name_entry = ttk.Entry(line, textvariable=self.name_var, width=24)
         self.name_entry.pack(side="left")
         self.name_entry.bind("<Return>", lambda e: self.save_name())
-        ttk.Button(self.name_row, text="Save", style="Accent.TButton", command=self.save_name).pack(side="left", padx=6)
+        ttk.Button(line, text="Save", style="Accent.TButton", command=self.save_name).pack(side="left", padx=6)
+        # after Y: the servo's type (optional): sets its starting ROM band
+        self.type_line = ttk.Frame(self.name_row)
+        ttk.Label(self.type_line, text="Servo type (optional)").pack(side="left", padx=(0, 8))
+        self.servo_box = ttk.Combobox(self.type_line, textvariable=self.servo_var, width=34)
+        self.servo_box.pack(side="left")
+        self.servo_box.bind("<KeyRelease>", lambda e: self._servo_typed(e))
+        self.servo_box.bind("<<ComboboxSelected>>", lambda e: self._servo_selected())
+        self.servo_box.bind("<Return>", lambda e: self.save_name())
+        ttk.Button(self.type_line, text="Don't know? Identify it",
+                   command=self.open_servo_identifier).pack(side="left", padx=6)
+        self.servo_info = ttk.Label(self.type_line, style="Muted.TLabel")
+        self.servo_info.pack(side="left", padx=(6, 0))
 
         self.found_table = ttk.Treeview(tab, columns=("target", "what", "name"), show="headings", height=8)
         for column, title, width in (("target", "Pin / channel", 160), ("what", "What", 140), ("name", "Name", 300)):
@@ -358,7 +378,7 @@ class RomApp:
         tab.columnconfigure(0, weight=1)
         tab.rowconfigure(1, weight=1)
         ttk.Label(tab, text="Drag servos from the right onto the bench (or click them). Each one moves only "
-                            "inside its start +/-300 us, slowly.", style="Muted.TLabel", wraplength=900).grid(
+                            "inside its start +/-300 us (or its servo type's safe band), slowly.", style="Muted.TLabel", wraplength=900).grid(
             row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
 
         self.bench_zone = ttk.LabelFrame(tab, text="Bench", padding=(10, 6))
@@ -541,7 +561,7 @@ class RomApp:
             row[key].state(["!disabled"] if enabled else ["disabled"])
         row["clear"].state(["!disabled"] if rom.rom1_us is not None or rom.rom2_us is not None else ["disabled"])
         row["widen"].state(["!disabled"] if rom.can_widen() else ["disabled"])
-        row["narrow"].state(["!disabled"] if not rom.complete and rom.band_half_us > MIN_BAND_HALF_US else ["disabled"])
+        row["narrow"].state(["!disabled"] if rom.can_narrow() else ["disabled"])
         position = self.controller.position(channel) if enabled else None
         marks = f"ROM 1 {rom.rom1_us if rom.rom1_us is not None else '-'} / ROM 2 {rom.rom2_us if rom.rom2_us is not None else '-'}"
         where = f"at {position} us" if position is not None else "no output"
@@ -1027,6 +1047,10 @@ class RomApp:
             self.name_row.grid()
         else:
             self.name_row.grid_remove()
+        if self.pending_kind == "servo":
+            self.type_line.pack(anchor="w", pady=(6, 0))
+        else:
+            self.type_line.pack_forget()
         self.save_map_btn.state(["!disabled"] if self._named_servos() else ["disabled"])
         for button in (self.to_rom_btn, self.to_bench_btn, self.bench_to_rom_btn):
             button.state(["!disabled"] if self._named_servos() and not busy else ["disabled"])
@@ -1039,6 +1063,9 @@ class RomApp:
         table.delete(*table.get_children())
         for item in self.found.values():
             what = KIND_TEXT.get(item.kind, item.kind)
+            if item.servo_id:
+                typed = find.servo_type(item.servo_id)
+                what += f" ({typed['model'] if typed else item.servo_id})"
             table.insert("", "end", values=(item.target.key, what, item.name or "-"))
         self._refresh_bench()
 
@@ -1116,6 +1143,7 @@ class RomApp:
             return
         self.pending_kind = kind
         self.name_var.set("")
+        self.choose_servo(None)
         self._refresh_identify()
         self.name_entry.focus_set()
 
@@ -1132,7 +1160,9 @@ class RomApp:
             return
         start = self._wiggle_values()[0] if kind == "servo" and self._wiggle_values() else None
         note = find.FAULTY_NOTE if kind == "faulty" else ""
-        self.found[target.key] = find.Found(target, kind, name, start, note)
+        servo_id = self.servo_choice["id"] if kind == "servo" and self.servo_choice else ""
+        self.found[target.key] = find.Found(target, kind, name, start, note, servo_id)
+        self._close_identifier()
         self.bench_roms.pop(target.key, None)
         if kind == "faulty":
             self._release_faulty(target, name)
@@ -1140,6 +1170,101 @@ class RomApp:
         if kind == "faulty":
             self._say(f"{name} ({target.key}) saved as FAULTY: {note}. The bench and range of motion skip it. "
                       + (f"Next: {self.current_target().key}." if self.current_target() else "All pins done."))
+
+    # -- servo type (servo_db)
+    @staticmethod
+    def _servo_label(entry: dict[str, Any]) -> str:
+        return f"{entry['brand']} {entry['model']}"
+
+    def _servo_typed(self, event: Any = None) -> None:
+        if event is not None and getattr(event, "keysym", "") in ("Return", "Down", "Up", "Escape", "Tab"):
+            return
+        text = self.servo_var.get().strip()
+        if self.servo_choice is not None and text != self._servo_label(self.servo_choice):
+            self.servo_choice = None
+            self.servo_info.configure(text="")
+        self._servo_hits = servo_db.search(text, limit=12) if text else []
+        self.servo_box.configure(values=[self._servo_label(e) for e in self._servo_hits])
+
+    def _servo_selected(self) -> None:
+        label = self.servo_var.get()
+        entry = next((e for e in self._servo_hits if self._servo_label(e) == label), None)
+        self.choose_servo(entry)
+
+    def choose_servo(self, entry: dict[str, Any] | str | None) -> None:
+        """The servo type for the target being named (None: unknown, the default band)."""
+        if isinstance(entry, str):
+            entry = servo_db.get(entry)
+        self.servo_choice = entry
+        if entry is None:
+            self.servo_var.set("")
+            self.servo_info.configure(text="")
+            return
+        self.servo_var.set(self._servo_label(entry))
+        low, high = servo_db.safe_pulse_range(entry)
+        clone = "  (clone: specs vary)" if entry.get("clone_of") else ""
+        self.servo_info.configure(text=f"starting ROM band {low}..{high} us{clone}")
+
+    def open_servo_identifier(self) -> None:
+        """20 questions in a small dialog: answer what you can see, pick the match."""
+        self._close_identifier()
+        self.identifier = servo_db.Identifier()
+        dialog = tk.Toplevel(self.root)
+        dialog.title("Identify the servo")
+        dialog.transient(self.root)
+        dialog.protocol("WM_DELETE_WINDOW", self._close_identifier)
+        frame = ttk.Frame(dialog, padding=14)
+        frame.pack(fill="both", expand=True)
+        self.ident_question = ttk.Label(frame, style="Big.TLabel", wraplength=460, justify="left")
+        self.ident_question.pack(anchor="w")
+        self.ident_options = ttk.Frame(frame)
+        self.ident_options.pack(anchor="w", pady=(8, 0), fill="x")
+        ttk.Label(frame, text="Best matches (click one to use it):", style="Muted.TLabel").pack(anchor="w", pady=(12, 0))
+        self.ident_matches = ttk.Frame(frame)
+        self.ident_matches.pack(anchor="w", fill="x")
+        ttk.Button(frame, text="Close", command=self._close_identifier).pack(anchor="e", pady=(12, 0))
+        self.ident_dialog = dialog
+        self._ident_show()
+
+    def _ident_show(self) -> None:
+        ident = self.identifier
+        if ident is None or self.ident_dialog is None:
+            return
+        for holder in (self.ident_options, self.ident_matches):
+            for child in holder.winfo_children():
+                child.destroy()
+        question = ident.next_question()
+        self.ident_current = question
+        if question is None:
+            self.ident_question.configure(text=f"{len(ident.candidates)} match(es) left: pick it below.")
+        else:
+            self.ident_question.configure(text=question.text)
+            for value in list(question.options[:8]) + [servo_db.UNKNOWN]:
+                text = "Don't know" if value == servo_db.UNKNOWN else str(value)
+                ttk.Button(self.ident_options, text=text,
+                           command=lambda v=value: self.ident_answer(v)).pack(side="left", padx=(0, 4), pady=2)
+        for entry in ident.ranked()[:6]:
+            ttk.Button(self.ident_matches, text=self._servo_label(entry),
+                       command=lambda e=entry: self.ident_pick(e)).pack(anchor="w", pady=1)
+
+    def ident_answer(self, value: Any) -> None:
+        if self.identifier is None or self.ident_current is None:
+            return
+        self.identifier.answer(self.ident_current.key, value)
+        self._ident_show()
+
+    def ident_pick(self, entry: dict[str, Any]) -> None:
+        self.choose_servo(entry)
+        self._close_identifier()
+
+    def _close_identifier(self) -> None:
+        dialog, self.ident_dialog = self.ident_dialog, None
+        self.identifier = None
+        if dialog is not None:
+            try:
+                dialog.destroy()
+            except tk.TclError:
+                pass
 
     def _release_faulty(self, target: find.Target, name: str) -> None:
         """A servo with broken feedback can keep pushing while it is held: offer to let go of it."""
@@ -1168,6 +1293,7 @@ class RomApp:
         self.last_action = ""
         self.pending_kind = ""
         self.name_var.set("")
+        self.choose_servo(None)
         self._refresh_found()
         self._refresh_identify()
         target = self.current_target()
@@ -1302,7 +1428,9 @@ class RomApp:
         start = found.start_us or find.DEFAULT_START_US
         model = self.bench_roms.get(key)
         if model is None or model.channel != channel:
-            model = RomChannel(channel, self._bench_name(key), start, self.band_half_us)
+            typed = find.servo_type(found.servo_id)
+            model = RomChannel(channel, self._bench_name(key), start, self.band_half_us,
+                               safe_us=tuple(typed["safe_start_us"]) if typed else None)
             self.bench_roms[key] = model
         elif model.start_us != start and not self._bench_powered(key):
             model.set_start(start)
@@ -1538,13 +1666,12 @@ class RomApp:
             row["buzz"].state(["!disabled"] if ready else ["disabled"])
             row["use"].state(["!disabled"] if ready and powered[key] else ["disabled"])
             row["widen"].state(["!disabled"] if model.can_widen() else ["disabled"])
-            row["narrow"].state(["!disabled"] if not model.complete and model.band_half_us > MIN_BAND_HALF_US
-                                else ["disabled"])
+            row["narrow"].state(["!disabled"] if model.can_narrow() else ["disabled"])
         any_on = any(powered[key] for key in self.bench)
         if not any_on and self.group_var.get() != 0:
             self._group_last = 0.0
             self.group_var.set(0)
-        half = max([self._bench_rom(key).band_half_us for key in self.bench] + [DEFAULT_BAND_HALF_US])
+        half = max([self._bench_rom(key).half_span for key in self.bench] + [DEFAULT_BAND_HALF_US])
         if int(float(self.group_scale.cget("to"))) != half:
             self.group_scale.configure(from_=-half, to=half)
         self.group_scale.configure(state="normal" if any_on and ready else "disabled")
@@ -2086,6 +2213,7 @@ class RomApp:
         if self._closed:
             return
         self._closed = True
+        self._close_identifier()
         try:
             if self.session is not None and self.armed:
                 self.session.close()

@@ -65,6 +65,10 @@ class RomChannel:
     map, from the ROM midpoint, or from the operator. Until it is known,
     ``suggested_us`` (e.g. the joint's approved neutral) only centres the
     display and the conservative band.
+
+    ``safe_us`` (optional) is a known servo type's safe start band
+    (``servo_db.safe_pulse_range``): with it, the band before ROM is that
+    range (always including the start pulse) instead of start +/- half.
     """
 
     channel: int
@@ -75,6 +79,7 @@ class RomChannel:
     rom2_us: int | None = None
     suggested_us: int = DEFAULT_START_US
     start_source: str = "none"
+    safe_us: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         if isinstance(self.channel, bool) or not isinstance(self.channel, int) or \
@@ -88,6 +93,11 @@ class RomChannel:
         if not isinstance(self.band_half_us, int) or self.band_half_us < 1:
             raise RomError("band_half_us must be a positive integer")
         self.label = self.label or channel_name(self.channel)
+        if self.safe_us is not None:
+            low, high = (_pulse(int(v), "safe band") for v in self.safe_us)
+            if not low < high:
+                raise RomError("safe band must be low < high")
+            self.safe_us = (low, high)
 
     @property
     def center(self) -> int:
@@ -96,7 +106,20 @@ class RomChannel:
     @property
     def band(self) -> tuple[int, int]:
         """Where the channel may move before its ROM is set."""
+        if self.safe_us is not None:
+            low, high = self.safe_us
+            return min(low, self.center), max(high, self.center)
         return max(ABS_MIN_US, self.center - self.band_half_us), min(ABS_MAX_US, self.center + self.band_half_us)
+
+    @property
+    def half_span(self) -> int:
+        """The larger side of the band, from the start pulse."""
+        low, high = self.band
+        return max(self.center - low, high - self.center)
+
+    def can_narrow(self) -> bool:
+        low, high = self.band
+        return not self.complete and (self.center - low > MIN_BAND_HALF_US or high - self.center > MIN_BAND_HALF_US)
 
     @property
     def complete(self) -> bool:
@@ -121,6 +144,10 @@ class RomChannel:
             raise RomError("clear the ROM before widening the band")
         if step_us < 1:
             raise RomError("widen step must be positive")
+        if self.safe_us is not None:
+            low, high = self.band
+            self.safe_us = (max(ABS_MIN_US, low - step_us), min(ABS_MAX_US, high + step_us))
+            return self.band
         full = max(self.center - ABS_MIN_US, ABS_MAX_US - self.center)
         self.band_half_us = min(self.band_half_us + step_us, full)
         return self.band
@@ -131,6 +158,15 @@ class RomChannel:
             raise RomError("clear the ROM before narrowing the band")
         if step_us < 1:
             raise RomError("narrow step must be positive")
+        if self.safe_us is not None:
+            low, high = self.band
+            c = self.center
+            new_low = min(low + step_us, c - MIN_BAND_HALF_US) if c - low > MIN_BAND_HALF_US else low
+            new_high = max(high - step_us, c + MIN_BAND_HALF_US) if high - c > MIN_BAND_HALF_US else high
+            if keep_inside is not None:
+                new_low, new_high = min(new_low, keep_inside), max(new_high, keep_inside)
+            self.safe_us = (max(ABS_MIN_US, new_low), min(ABS_MAX_US, new_high))
+            return self.band
         floor = MIN_BAND_HALF_US if keep_inside is None else max(MIN_BAND_HALF_US, abs(keep_inside - self.center))
         self.band_half_us = max(self.band_half_us - step_us, floor)
         return self.band
@@ -165,6 +201,8 @@ class RomChannel:
         self.rom2_us = None
         if keep_inside is not None:
             self.band_half_us = max(self.band_half_us, abs(keep_inside - self.center))
+            if self.safe_us is not None:
+                self.safe_us = (min(self.safe_us[0], keep_inside), max(self.safe_us[1], keep_inside))
 
     def firmware_band(self) -> tuple[int, int, int]:
         """(min, neutral, max) for the firmware LIMIT command."""
@@ -439,7 +477,9 @@ def channels_from_map(hardware_map: dict[str, Any], selected: list[int] | None =
         channel = int(values["channel"])
         if selected and channel not in selected:
             continue
-        rom = RomChannel(channel, joint, None, band_half_us, suggested_us=int(values["neutral_us"]))
+        safe = (values.get("servo_type") or {}).get("safe_start_us")
+        rom = RomChannel(channel, joint, None, band_half_us, suggested_us=int(values["neutral_us"]),
+                         safe_us=tuple(safe) if safe else None)
         saved = values.get("rom")
         if saved:
             rom.rom1_us, rom.rom2_us = int(saved["rom1_us"]), int(saved["rom2_us"])
@@ -452,6 +492,8 @@ def channels_from_map(hardware_map: dict[str, Any], selected: list[int] | None =
             # Widen the pre-ROM band so clearing a saved ROM keeps it reachable.
             low, high = rom.range
             rom.band_half_us = max(band_half_us, rom.center - low, high - rom.center)
+            if rom.safe_us is not None:
+                rom.safe_us = (min(rom.safe_us[0], low), max(rom.safe_us[1], high))
         rows.append(rom)
     missing = set(selected or ()) - {rom.channel for rom in rows}
     faulty = faulty_servos(hardware_map)
