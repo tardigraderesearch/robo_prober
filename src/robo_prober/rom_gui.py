@@ -192,6 +192,8 @@ class RomApp:
         ttk.Button(top, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=(0, 12))
         self.restore_btn = ttk.Button(top, text="Restore original firmware", command=self.restore_firmware)
         self.restore_btn.grid(row=1, column=2, sticky="e", padx=(0, 12), pady=(6, 0))
+        self.update_btn = ttk.Button(top, text="Update firmware", command=self.update_firmware)
+        self.update_btn.grid(row=1, column=1, sticky="e", padx=(0, 6), pady=(6, 0))
         self.flash_bar = ttk.Progressbar(top, mode="determinate", maximum=100)
         self.flash_bar.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
         self.flash_bar.grid_remove()
@@ -733,6 +735,8 @@ class RomApp:
             self.verified_ports.add(port)
             if status.state == "sbc":
                 self._say(status.message)
+            elif status.update_available:  # works as is: no popup, just say an update exists
+                self._say(f"{status.message} It works as is; 'Update firmware' installs the new one.")
             if then is not None and not self._closed:
                 then()
 
@@ -756,13 +760,16 @@ class RomApp:
         text = (f"{lead} Back up everything on it to {self.backup_dir} and install the robo-prober test "
                 "firmware? Unplug servo power first.\n\nThe backup reads the whole flash (about 100 s for 8 MB); "
                 "'Restore original firmware' writes it back later.")
-        if self.ask_fn("Install robo-prober firmware", text, ["Back up and install", "Cancel"]) != "Back up and install":
+        choice = self.ask_fn("Install robo-prober firmware", text,
+                             ["Back up and install", "Install without backup", "Cancel"])
+        if choice not in ("Back up and install", "Install without backup"):
             self._say("Nothing was flashed. robo-prober needs its own firmware on the board to continue.")
             return
+        backup = choice == "Back up and install"
         self._drop_connection()
 
         def work(progress):
-            return self.install_fn(port, out_dir=self.backup_dir, progress=progress, force=True)
+            return self.install_fn(port, out_dir=self.backup_dir, progress=progress, force=True, backup=backup)
 
         def done(result: flasher.InstallResult) -> None:
             self.verified_ports.add(port)
@@ -778,6 +785,17 @@ class RomApp:
             self._say(f"Firmware install stopped: {error}", error=True)
 
         self._run_job(work, done, failed)
+
+    def update_firmware(self) -> None:
+        """Install the bundled firmware on request (same choices: back up first, or skip the backup)."""
+        port = self._port()
+        if port is None:
+            return
+        if port == EMULATOR_PORT:
+            self._say("The built-in emulator has no firmware to update.", error=True)
+            return
+        self.verified_ports.discard(port)
+        self.offer_install(port)
 
     def restore_firmware(self) -> None:
         if self.flashing:

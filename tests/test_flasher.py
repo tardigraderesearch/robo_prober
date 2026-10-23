@@ -92,7 +92,7 @@ def test_classify_current_foreign_outdated_and_sbc():
     assert flasher.classify_hello(None).state == "foreign"
     assert flasher.classify_hello({"proto": "OTHER"}).state == "foreign"
     old = flasher.classify_hello(hello(fw="0.2.0"))
-    assert old.state == "outdated" and old.needs_install
+    assert old.state == "outdated" and not old.needs_install and old.update_available  # same caps: works as is, no popup
     sbc = flasher.classify_hello(hello(fw="0.0.1", id="raspberry_pi_5"))
     assert sbc.state == "sbc" and not sbc.needs_install and "python -m robo_prober.sbc" in sbc.message
 
@@ -260,3 +260,8 @@ def test_cli_install_yes_flag(monkeypatch, tmp_path):
     monkeypatch.setattr(flasher, "install", fake_install)
     assert cli.main(["firmware", "install", "--port", "FAKE", "-y", "--backup-dir", str(tmp_path)]) == 0
     assert seen["port"] == "FAKE" and seen["out_dir"] == tmp_path
+
+
+def test_install_can_skip_the_backup(tmp_path):
+    import inspect
+    assert inspect.signature(flasher.install).parameters["backup"].default is True

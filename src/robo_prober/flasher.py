@@ -93,7 +93,12 @@ class FirmwareStatus:
 
     @property
     def needs_install(self) -> bool:
-        return self.state in ("outdated", "foreign")
+        """Only when the app can't work with what's on the board: foreign firmware, or missing caps."""
+        return self.state == "foreign" or (self.state == "outdated" and bool(self.missing_caps))
+
+    @property
+    def update_available(self) -> bool:
+        return self.state == "outdated" and not self.missing_caps
 
 
 def classify_hello(info: dict[str, str] | None, manifest: dict[str, Any] | None = None) -> FirmwareStatus:
@@ -392,7 +397,7 @@ class InstallResult:
 
 def install(port: str, *, out_dir: Path = BACKUP_DIR, progress: Progress = _noop, force: bool = False,
             open_session=_open_session, check=check_firmware, firmware_dir: Path = FIRMWARE_DIR,
-            verify_wait_s: float = 12.0) -> InstallResult:
+            verify_wait_s: float = 12.0, backup: bool = True) -> InstallResult:
     """HELLO; if not current: identify, back up all flash, flash, verify. Refuses on a failed backup."""
     manifest = load_manifest(firmware_dir)
     status = check(port, manifest=manifest)
@@ -403,14 +408,18 @@ def install(port: str, *, out_dir: Path = BACKUP_DIR, progress: Progress = _noop
     progress("Identifying the chip", 0, 1)
     session = open_session(port)
     try:
-        path, info = _backup_with(session, Path(out_dir), progress, None)
+        if backup:
+            path, info = _backup_with(session, Path(out_dir), progress, None)
+        else:  # the operator chose to skip it
+            path, info = None, _identify(session)
         _flash_with(session, info, progress, firmware_dir)
     finally:
         session.close()
     progress("Waiting for the board to answer HELLO", 0, 1)
     final = verify_test_firmware(port, wait_s=verify_wait_s, check=check, manifest=manifest)
     return InstallResult(False, f"Installed robo-prober firmware {manifest['fw_version']} on {info.name} "
-                                f"({info.mac}). Original firmware backed up to {path}.", path, info, final)
+                                f"({info.mac}). " + (f"Original firmware backed up to {path}." if path else "No backup was made (skipped)."),
+                         path, info, final)
 
 
 def read_backup_meta(backup_path: Path) -> dict[str, Any]:
