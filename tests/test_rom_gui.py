@@ -374,3 +374,25 @@ def test_identify_back_and_table_jump_redo(tmp_path):
         assert app.jump_to("GPIO 999") is False and app.current_target().key == second
     finally:
         app.close()
+
+
+def test_estop_latched_before_window_opened_can_be_cleared():
+    """A latch left on the board from an earlier run must not deadlock the window."""
+    from robo_prober.rom_gui import RomApp
+
+    root = _fw_root()
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    try:
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        app.controller.transport.estop()       # latched on the "board"
+        app.estop_latched = False              # as if the window was restarted
+        app.armed and app.controller.disarm()
+        app.connect_and_arm()                  # refused: latched...
+        assert not app.armed and app.estop_latched and app.controller is not None
+        app.clear_estop()                      # ...but Clear can reach the board
+        assert not app.estop_latched
+        app.connect_and_arm()
+        assert app.armed
+    finally:
+        app.close()

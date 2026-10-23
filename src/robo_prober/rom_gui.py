@@ -701,6 +701,9 @@ class RomApp:
         except Exception as error:  # noqa: BLE001 - shown to the operator
             self._say(f"Could not connect: {error}", error=True)
             return False
+        if (getattr(self.controller, "info", None) or {}).get("mode") == "estop":
+            self.estop_latched = True  # latched before this window opened
+            self._refresh_all()
         return True
 
     def connect_and_arm(self) -> None:
@@ -722,6 +725,14 @@ class RomApp:
                 self.session = None
                 self.controller.arm(power_cutoff_confirmed=True, heartbeat="manual")
         except Exception as error:  # noqa: BLE001 - shown to the operator
+            if "estop_latched" in str(error) or "e-stop is latched" in str(error):
+                # The latch lives on the board and survives a restart of this window:
+                # keep the connection so Clear e-stop can reach it.
+                self.session = None
+                self.estop_latched = True
+                self._say("The board's e-stop is still latched. Press Clear e-stop, then Connect & arm.", error=True)
+                self._refresh_all()
+                return
             self._drop_connection()
             self._say(f"Could not arm: {error}", error=True)
             self._refresh_all()
@@ -1191,8 +1202,10 @@ class RomApp:
         self._refresh_all()
 
     def clear_estop(self) -> None:
-        if self.controller is None or not self.cutoff_var.get():
+        if not self.cutoff_var.get():
             self._say("Confirm the power cutoff to clear the e-stop.", error=True)
+            return
+        if self.controller is None and not self._ensure_connected():
             return
         try:
             self.controller.clear_estop(power_cutoff_confirmed=True)
