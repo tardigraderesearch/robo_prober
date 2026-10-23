@@ -709,19 +709,37 @@ class RomApp:
         if self.flashing and self.run_async and not self._closed:
             self.root.after(100, self._poll_jobs)
 
-    def _firmware_ready(self, port: str) -> bool:
-        """True when the board on ``port`` runs current robo-prober firmware (or needs none)."""
+    def _firmware_ready(self, port: str, then: Callable[[], None] | None = None) -> bool:
+        """True when the board on ``port`` is known to run current robo-prober firmware (or needs none).
+
+        Otherwise the HELLO check runs off the Tk thread (a silent board takes
+        seconds to time out; the window must not freeze) and this returns
+        False; when the board answers with current firmware, ``then`` runs
+        (the action that asked, retried). Anything else gets the install offer.
+        """
         if port == EMULATOR_PORT or port in self.verified_ports or self.firmware_check_fn is None:
             return True
-        self._say(f"Checking the firmware on {port} (HELLO, nothing moves)...")
-        self.root.update_idletasks()
-        status = self.firmware_check_fn(port)
-        if not status.needs_install:
+        check = self.firmware_check_fn
+
+        def work(progress):
+            progress(f"Checking the firmware on {port} (HELLO, nothing moves)", 0, 1)
+            return check(port)
+
+        def done(status: flasher.FirmwareStatus) -> None:
+            if status.needs_install:
+                self.offer_install(port, status)
+                return
             self.verified_ports.add(port)
             if status.state == "sbc":
                 self._say(status.message)
-            return True
-        self.offer_install(port, status)
+            if then is not None and not self._closed:
+                then()
+
+        def failed(error: Exception) -> None:
+            self._say(f"Could not check the firmware: {error}", error=True)
+
+        self._say(f"Checking the firmware on {port} (HELLO, nothing moves)...")
+        self._run_job(work, done, failed)
         return False
 
     def offer_install(self, port: str, status: flasher.FirmwareStatus | None = None) -> None:
@@ -811,17 +829,18 @@ class RomApp:
 
         self._run_job(work, done, failed)
 
-    def _ensure_connected(self) -> bool:
+    def _ensure_connected(self, then: Callable[[], None] | None = None) -> bool:
+        """Connect if needed. False while a firmware check runs in the background; ``then`` runs after it."""
         if self.controller is not None:
             return True
         if self.flashing:
-            self._say("Wait for the firmware job to finish.", error=True)
+            self._say("Wait for the firmware check or job to finish.", error=True)
             return False
         port = self._port()
         if port is None:
             return False
         try:
-            if not self._firmware_ready(port):
+            if not self._firmware_ready(port, then):
                 return False
         except Exception as error:  # noqa: BLE001 - shown to the operator
             self._say(f"Could not check the firmware: {error}", error=True)
@@ -842,7 +861,7 @@ class RomApp:
         if not self.cutoff_var.get():
             self._say("Confirm that a physical power cutoff is within reach first.", error=True)
             return
-        if not self._ensure_connected():
+        if not self._ensure_connected(self.connect_and_arm):
             return
         try:
             # Heartbeats come from the window's own timer: if the window freezes,
@@ -875,7 +894,7 @@ class RomApp:
 
     # ------------------------------------------------------------ 1. discover
     def discover(self) -> None:
-        if not self._ensure_connected():
+        if not self._ensure_connected(self.discover):
             return
         try:
             self.survey = find.discover(self.controller)
@@ -926,7 +945,7 @@ class RomApp:
 
     def toggle_watch(self) -> None:
         on = self.watch_var.get()
-        if on and not self._ensure_connected():
+        if on and not self._ensure_connected(lambda: (self.watch_var.set(True), self.toggle_watch())):
             self.watch_var.set(False)
             return
         try:
@@ -2042,7 +2061,7 @@ class RomApp:
         if not self.cutoff_var.get():
             self._say("Confirm the power cutoff to clear the e-stop.", error=True)
             return
-        if self.controller is None and not self._ensure_connected():
+        if self.controller is None and not self._ensure_connected(self.clear_estop):
             return
         try:
             self.controller.clear_estop(power_cutoff_confirmed=True)

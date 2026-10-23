@@ -691,3 +691,43 @@ def test_identify_servo_type_typeahead_and_twenty_questions(tmp_path):
         assert app.hardware_map["joints"]["pitch"]["servo_type"]["id"] == "corona-ds-929mg"
     finally:
         app.close()
+
+
+def test_firmware_check_on_connect_runs_off_the_tk_thread(tmp_path):
+    """A silent board takes seconds to time out: the window keeps responding, then continues."""
+    import threading
+    import time
+
+    from robo_prober import flasher
+    from robo_prober.api import connect
+    from robo_prober.rom_gui import RomApp
+
+    release = threading.Event()
+    seen = []
+
+    def slow_check(port):
+        seen.append(threading.current_thread() is threading.main_thread())
+        release.wait(5)
+        return flasher.FirmwareStatus("current", "ok")
+
+    app = RomApp(_fw_root(), port=FAKE_PORT, run_timer=False, run_async=True, backup_dir=tmp_path,
+                 connect_fn=lambda port: connect(emulator=True), firmware_check_fn=slow_check)
+    try:
+        began = time.monotonic()
+        app.discover()
+        assert time.monotonic() - began < 0.5 and app.controller is None and app.survey is None
+        app.root.update()
+        assert "Checking the firmware" in app.status.get() and app.flashing
+        app.discover()                                         # a second click waits; no second check
+        assert "Wait for the firmware check" in app.last_error
+        release.set()
+        for _ in range(100):
+            app.root.update()
+            time.sleep(0.02)
+            if app.survey is not None:
+                break
+        assert seen == [False]                                 # checked on a worker thread, once
+        assert app.survey is not None and FAKE_PORT in app.verified_ports   # Discover continued by itself
+    finally:
+        release.set()
+        app.close()
