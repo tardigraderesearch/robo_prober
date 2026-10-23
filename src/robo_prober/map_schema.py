@@ -11,6 +11,8 @@ from typing import Any
 
 SCHEMA_VERSION = 1
 JOINT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
+# Joints are servos; everything else the find-servos step names goes in "devices".
+DEVICE_KINDS = ("servo", "led", "button", "i2c", "sensor", "unknown")
 
 
 class MapValidationError(ValueError):
@@ -126,6 +128,14 @@ def validate_map(data: dict[str, Any]) -> None:
             pulse = last.get("pulse_us") if isinstance(last, dict) else None
             if type(pulse) is not int or not 500 <= pulse <= 2500 or not last.get("at"):
                 raise MapValidationError(f"joint {joint}: last_position needs pulse_us in 500..2500 and at")
+    devices = data.get("devices", {})
+    if not isinstance(devices, dict):
+        raise MapValidationError("devices must be an object")
+    for name, values in devices.items():
+        if not JOINT_NAME_RE.match(str(name)):
+            raise MapValidationError(f"invalid device name {name!r}")
+        if not isinstance(values, dict) or values.get("kind") not in DEVICE_KINDS:
+            raise MapValidationError(f"device {name}: kind must be one of {', '.join(DEVICE_KINDS)}")
     if data.get("permission_hash") != stable_json_hash(data.get("probe_permissions")):
         raise MapValidationError("permission_hash mismatch")
 

@@ -35,6 +35,11 @@ class RomError(ValueError):
     pass
 
 
+def channel_name(channel: int) -> str:
+    """"ch 3" for a PCA9685 output, "GPIO 4" for channel 104 (a servo straight on a pin)."""
+    return f"GPIO {channel - 100}" if channel >= 100 else f"ch {channel}"
+
+
 def _pulse(value: Any, name: str) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not ABS_MIN_US <= value <= ABS_MAX_US:
         raise RomError(f"{name} must be an integer pulse in {ABS_MIN_US}..{ABS_MAX_US} us, got {value!r}")
@@ -70,8 +75,9 @@ class RomChannel:
     start_source: str = "none"
 
     def __post_init__(self) -> None:
-        if isinstance(self.channel, bool) or not isinstance(self.channel, int) or not 0 <= self.channel <= 15:
-            raise RomError("channel must be 0..15")
+        if isinstance(self.channel, bool) or not isinstance(self.channel, int) or \
+                not (0 <= self.channel <= 15 or self.channel >= 100):
+            raise RomError("channel must be 0..15 (PCA9685) or 100+N (GPIO N)")
         if self.start_us is not None:
             _pulse(self.start_us, "start pulse")
             if self.start_source == "none":
@@ -79,7 +85,7 @@ class RomChannel:
         _pulse(self.suggested_us, "suggested start pulse")
         if not isinstance(self.band_half_us, int) or self.band_half_us < 1:
             raise RomError("band_half_us must be a positive integer")
-        self.label = self.label or f"channel {self.channel}"
+        self.label = self.label or channel_name(self.channel)
 
     @property
     def center(self) -> int:

@@ -206,6 +206,49 @@ class SerialProtocolTransport:
         return self.transact(f"START channel={channel} pulse_us={pulse_us} token={self._token}",
                              {"channel": str(channel), "started_us": str(pulse_us)})
 
+    # -- discovery (v0.3 firmware: caps survey, watch, i2c, probe, blink) -------
+    def board(self) -> dict[str, str]:
+        return self.transact("BOARD")
+
+    def survey(self, pin: int) -> dict[str, str]:
+        """Read-only: classify one pin (floating, pulled_*, driven_*, reserved)."""
+        return self.transact(f"SURVEY pin={pin}", {"pin": str(pin)})
+
+    def watch(self, on: bool) -> None:
+        self.transact(f"WATCH state={'on' if on else 'off'}", {"watch": "1" if on else "0"})
+
+    def events(self) -> list[tuple[int, int]]:
+        """Level changes queued since the last call, as (pin, level)."""
+        text = self.transact("EVENTS").get("events", "none")
+        if text == "none":
+            return []
+        return [(int(pin), int(level)) for pin, level in (item.split(":") for item in text.split(","))]
+
+    def i2c_scan(self, sda: int, scl: int) -> tuple[list[str], list[str]]:
+        """Addresses that answer on this pin pair, and the ones that look like a PCA9685."""
+        fields = self.transact(f"I2C_SCAN sda={sda} scl={scl}")
+        split = lambda text: [] if text in (None, "none") else text.split(",")  # noqa: E731
+        return split(fields.get("devices")), split(fields.get("pca9685"))
+
+    def _session_token(self, what: str) -> str:
+        if self._token is None:
+            raise ProtocolError(f"{what} requires an armed session")
+        return self._token
+
+    def probe(self, pin: int, start_us: int) -> int:
+        """Servo PWM on one GPIO at an explicit start pulse; returns its channel number."""
+        token = self._session_token("PROBE")
+        fields = self.transact(f"PROBE pin={pin} mode=servo start_us={start_us} token={token}", {"pin": str(pin)})
+        return _int_field(fields, "channel")
+
+    def blink(self, pin: int, count: int) -> None:
+        token = self._session_token("BLINK")
+        self.transact(f"BLINK pin={pin} count={count} token={token}", {"pin": str(pin)})
+
+    def release(self, pin: int) -> None:
+        token = self._session_token("RELEASE")
+        self.transact(f"RELEASE pin={pin} token={token}", {"pin": str(pin), "released": "1"})
+
     def heartbeat(self) -> None:
         token = self._token
         if token is None:

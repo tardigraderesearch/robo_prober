@@ -1,0 +1,101 @@
+"""The find-servos cascade against the emulated board.
+
+Emulated wiring (reference_device.DEFAULT_SOURCES / fake_board.h): a servo on
+GPIO4, an LED on GPIO5, a button with a pull-up on GPIO6, another chip's
+output driving GPIO7 low, a PCA9685 on GPIO8/9.
+"""
+import time
+
+import pytest
+
+from robo_prober.api import connect
+from robo_prober.find import Found, Target, Wiggle, blink, build_map, discover, targets
+from robo_prober.reference_device import ReferenceDevice
+from robo_prober.rom import channels_from_map
+from robo_prober.transport import ProtocolError
+
+
+@pytest.fixture
+def setup():
+    device = ReferenceDevice()
+    ctl = connect(emulator=True, device=device)
+    yield ctl, device
+    ctl.close()
+
+
+def test_discover_classifies_pins_without_driving_anything(setup):
+    ctl, device = setup
+    survey = discover(ctl)
+    classes = {info.pin: info.cls for info in survey.pins}
+    assert (classes[4], classes[5], classes[6], classes[7]) == ("floating", "pulled_down", "pulled_up", "driven_low")
+    assert 8 not in classes and 19 not in classes          # PCA9685 bus and USB: not offered
+    assert survey.pca_bus == (8, 9) and survey.pca_addresses == ["0x40"]
+    assert survey.i2c == {(8, 9): ["0x40", "0x70"]}
+    assert "PCA9685 at 0x40 on SDA 8 / SCL 9" in survey.summary()
+    assert device.write_log == [] and device.level_log == []
+    keys = [t.key for t in targets(survey)]
+    assert keys[0] == "GPIO 1" and "GPIO 4" in keys and "PCA9685 ch 0" in keys
+    assert "GPIO 7" not in keys                              # driven: never a target
+    assert keys.index("GPIO 5") > keys.index("GPIO 21")      # pulled pins after floating ones
+    assert keys[-1] in ("GPIO 0", "GPIO 3", "GPIO 45")       # strapping pins last
+
+
+def test_cascade_finds_servo_led_button_and_never_drives_a_driven_pin(setup):
+    ctl, device = setup
+    survey = discover(ctl)
+    ctl.watch(True)
+    device.board.set_source(6, 0, 0)                         # operator presses the button
+    time.sleep(0.01)
+    ctl.events()
+    device.board.set_source(6, 3300, 10000)
+    time.sleep(0.01)
+    pressed = {pin for pin, _ in ctl.events()}
+    ctl.watch(False)
+    assert pressed == {6}
+
+    ctl.arm(power_cutoff_confirmed=True, heartbeat="manual")
+    servo = Target(4, cls="floating")
+    Wiggle(ctl, servo, 1500, 60, slew_us_s=2000).run(timeout_s=5)
+    pulses = [p for ch, p in device.write_log if ch == 104]
+    assert pulses[0] == 1500 and max(pulses) == 1560 and min(pulses) == 1440 and pulses[-1] == 1500
+    assert device.output(104) is None                         # released after the probe
+    assert (device.channels[16 + 4].min_us, device.channels[16 + 4].max_us) == (1400, 1600)
+
+    blink(ctl, Target(5, cls="pulled_down"))
+    assert device.level_log[0] == (105, True)
+
+    with pytest.raises(ProtocolError, match="pin_driven"):
+        Wiggle(ctl, Target(7, cls="floating"), 1500, 60, slew_us_s=2000).run(timeout_s=5)
+    with pytest.raises(ProtocolError, match="pin_driven"):
+        ctl.blink(7, 1)
+    assert all(ch != 107 for ch, _ in device.write_log + device.level_log)
+
+    Wiggle(ctl, Target(pca_channel=3), 1500, 60, slew_us_s=2000).run(timeout_s=5)
+    assert device.output(3) == 1500                           # a PCA9685 channel stays held
+    ctl.disarm()
+    assert device.output(3) is None and device.output(105) is None
+
+    found = [Found(servo, "servo", "shoulder", 1500), Found(Target(5), "led", "status LED"),
+             Found(Target(6), "button", "e button"), Found(Target(pca_channel=3), "servo", "elbow", 1500),
+             Found(Target(10), "unused")]
+    hw = build_map(ctl.info, survey, found)
+    assert hw["joints"]["shoulder"]["channel"] == 104 and hw["joints"]["elbow"]["channel"] == 3
+    assert hw["devices"]["status_LED"] == {"kind": "led", "pin": 5}
+    assert hw["devices"]["e_button"]["kind"] == "button"
+    roms = channels_from_map(hw)
+    assert [(r.channel, r.label, r.start_us) for r in roms] == [(3, "elbow", 1500), (104, "shoulder", 1500)]
+
+
+def test_gpio_servo_works_in_the_range_of_motion_session(setup):
+    from robo_prober.rom import RomChannel, RomSession
+
+    ctl, device = setup
+    session = RomSession(ctl, [RomChannel(104, "shoulder", 1500)], host_slew_us_s=2000, heartbeat="manual")
+    session.start(power_cutoff_confirmed=True)
+    session.enable(104)
+    assert device.write_log == [(104, 1500)]
+    session.set_target(104, 1700)
+    session.run_until_settled(timeout_s=5)
+    assert ctl.position(104) == 1700
+    session.close()
+    assert device.output(104) is None

@@ -12,7 +12,8 @@
 //
 // stdout (one line per event, for the test harness):
 //   PORT <slave path>          once, at start
-//   PWM <ms> <channel> <us>    the output driver wrote a pulse (only on change)
+//   PWM <ms> <slot> <us>       the output driver wrote a pulse (only on change; slot
+//                              0..15 = PCA9685 channel, 16+N = GPIO N, us 0/1 = BLINK level)
 //   PWM <ms> <channel> off     the output driver released a channel
 //   ACK <command>              a stdin control command was applied
 // stdin (control lines, not seen by the firmware):
@@ -30,6 +31,7 @@
 #include <cstring>
 #include <string>
 
+#include "fake_board.h"
 #include "rp_core.h"
 
 namespace {
@@ -42,16 +44,21 @@ uint32_t millisNow() {
 
 class TelemetryDriver : public rp::OutputDriver {
  public:
-  int pulse[rp::kChannels];
+  int pulse[rp::kSlots];
   bool fail = false;
 
   TelemetryDriver() {
-    for (int i = 0; i < rp::kChannels; ++i) pulse[i] = -1;
+    for (int i = 0; i < rp::kSlots; ++i) pulse[i] = -1;
   }
   bool available() override { return true; }
   bool writePulseUs(uint8_t channel, uint16_t pulse_us) override {
     if (fail) return false;
     set(channel, pulse_us);
+    return true;
+  }
+  bool writeLevel(uint8_t channel, bool high) override {
+    if (fail) return false;
+    set(channel, high ? 1 : 0);  // digital level (BLINK), reported as a 0/1 "pulse"
     return true;
   }
   bool release(uint8_t channel) override {
@@ -60,7 +67,7 @@ class TelemetryDriver : public rp::OutputDriver {
   }
   bool releaseAll() override {
     // A failing bus still drops the outputs here (as the PCA9685 OE pin would).
-    for (int i = 0; i < rp::kChannels; ++i) set(static_cast<uint8_t>(i), -1);
+    for (int i = 0; i < rp::kSlots; ++i) set(static_cast<uint8_t>(i), -1);
     return !fail;
   }
 
@@ -116,10 +123,13 @@ int main() {
   fcntl(master, F_SETFL, fcntl(master, F_GETFL) | O_NONBLOCK);
 
   TelemetryDriver driver;
-  rp::Core core(driver, "firmware-bench", "bench", rp::kDefaultWatchdogMs);
+  sim::FakeBoard board;
+  sim::FakeI2c bus;
+  rp::Core core(driver, board, "firmware-bench", "bench", rp::kDefaultWatchdogMs);
   rp::LineBuffer buffer;
   char reply[rp::kReplyMax + 2];
   core.begin(millisNow());
+  core.findI2c(bus);
   std::printf("PORT %s\n", slave_path.c_str());
   std::fflush(stdout);
 

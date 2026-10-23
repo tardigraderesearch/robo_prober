@@ -16,8 +16,8 @@ constexpr uint8_t kFullOffBit = 0x10;  // bit 4 of LEDn_OFF_H
 
 }  // namespace
 
-Pca9685Driver::Pca9685Driver(uint8_t address, int oe_pin, uint32_t oscillator_hz, uint16_t frequency_hz)
-    : address_(address), oe_pin_(oe_pin), oscillator_hz_(oscillator_hz), frequency_hz_(frequency_hz) {}
+Pca9685Driver::Pca9685Driver(int oe_pin, uint32_t oscillator_hz, uint16_t frequency_hz)
+    : oe_pin_(oe_pin), oscillator_hz_(oscillator_hz), frequency_hz_(frequency_hz) {}
 
 void Pca9685Driver::setOutputEnable(bool enabled) {
   if (oe_pin_ >= 0) digitalWrite(oe_pin_, enabled ? LOW : HIGH);  // OE is active low
@@ -49,7 +49,8 @@ bool Pca9685Driver::writeLed(uint8_t channel, uint16_t on, uint16_t off) {
   return Wire.endTransmission() == 0;
 }
 
-bool Pca9685Driver::begin() {
+bool Pca9685Driver::begin(uint8_t address) {
+  address_ = address;
   if (oe_pin_ >= 0) {
     pinMode(oe_pin_, OUTPUT);
     setOutputEnable(false);

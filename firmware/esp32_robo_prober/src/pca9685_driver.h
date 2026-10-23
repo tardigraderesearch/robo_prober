@@ -11,11 +11,11 @@
 
 class Pca9685Driver : public rp::OutputDriver {
  public:
-  Pca9685Driver(uint8_t address, int oe_pin, uint32_t oscillator_hz, uint16_t frequency_hz);
+  Pca9685Driver(int oe_pin, uint32_t oscillator_hz, uint16_t frequency_hz);
 
-  // Call before anything else in setup(). Disables OE first, then probes the
-  // chip and configures it. Returns false if the chip does not answer.
-  bool begin();
+  // Disables OE first, then configures the chip at `address` on the already
+  // started Wire bus, all outputs off. Returns false if it does not answer.
+  bool begin(uint8_t address);
 
   bool available() override { return ok_; }
   bool writePulseUs(uint8_t channel, uint16_t pulse_us) override;
@@ -28,7 +28,7 @@ class Pca9685Driver : public rp::OutputDriver {
   bool writeLed(uint8_t channel, uint16_t on, uint16_t off);
   void setOutputEnable(bool enabled);
 
-  uint8_t address_;
+  uint8_t address_ = 0;
   int oe_pin_;
   uint32_t oscillator_hz_;
   uint16_t frequency_hz_;
@@ -42,6 +42,7 @@ class NullDriver : public rp::OutputDriver {
  public:
   bool available() override { return true; }
   bool writePulseUs(uint8_t, uint16_t) override { return true; }
+  bool writeLevel(uint8_t, bool) override { return true; }
   bool release(uint8_t) override { return true; }
   bool releaseAll() override { return true; }
 };

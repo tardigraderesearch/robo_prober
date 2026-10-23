@@ -96,6 +96,18 @@ def apply(root: tk.Misc) -> ttk.Style:
 
     _rounded_elements(root, style)
 
+    style.configure("TNotebook", background=BG, bordercolor=BORDER, tabmargins=(0, 4, 0, 0))
+    style.configure("TNotebook.Tab", background=SURFACE, foreground=MUTED, bordercolor=BORDER,
+                    lightcolor=SURFACE, padding=(14, 6), font=FONT_BOLD)
+    style.map("TNotebook.Tab", background=[("selected", SURFACE_HI)], foreground=[("selected", ACCENT)],
+              lightcolor=[("selected", ACCENT)])
+    style.configure("Treeview", background=SURFACE, fieldbackground=SURFACE, foreground=TEXT,
+                    bordercolor=BORDER, lightcolor=SURFACE, darkcolor=SURFACE, rowheight=22)
+    style.map("Treeview", background=[("selected", ACCENT_LO)], foreground=[("selected", ON_ACCENT)])
+    style.configure("Treeview.Heading", background=SURFACE_HI, foreground=ACCENT, bordercolor=BORDER,
+                    lightcolor=SURFACE_HI, darkcolor=SURFACE_HI, font=FONT_BOLD, relief="flat")
+    style.map("Treeview.Heading", background=[("active", SURFACE_HI)])
+
     style.configure("Horizontal.TProgressbar", background=ACCENT, troughcolor=SURFACE,
                     bordercolor=BORDER, lightcolor=ACCENT, darkcolor=ACCENT, thickness=10)
     return style

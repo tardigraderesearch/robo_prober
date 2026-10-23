@@ -9,6 +9,7 @@ Everything the CLI and the ROM window do is available from Python::
         ctl.set_limits(0, 1300, 1700, neutral_us=1500)
         ctl.arm(power_cutoff_confirmed=True)  # session token generated for you
         ctl.start(0, 1500)                    # first pulse: explicit, never a firmware default
+        ctl.start(104, 1500)                  # channel 100+N: a servo straight on GPIO N
         ctl.set_pulse(0, 1550)                # slew-limited on the host and in the firmware
         ctl.disarm()
 
@@ -39,6 +40,7 @@ from .transport import (
 )
 
 EMULATOR_PORT = "emulator"
+GPIO_BASE = 100  # channel 100+N is GPIO N driven directly by the controller
 DEFAULT_HOST_SLEW_US_S = 200
 
 
@@ -208,6 +210,41 @@ class Controller:
         """Last pulse commanded on a channel in this session, or None if never driven."""
         return self._positions.get(channel)
 
+    # -- discovery (read-only until armed) ---------------------------------
+    def board(self) -> dict[str, str]:
+        """Board profile id, chip model and the pins the firmware may survey."""
+        self.transport.require_caps("survey")
+        return self.transport.board()
+
+    def survey(self, pin: int) -> dict[str, str]:
+        self.transport.require_caps("survey")
+        return self.transport.survey(pin)
+
+    def watch(self, on: bool) -> None:
+        self.transport.require_caps("watch")
+        self.transport.watch(on)
+
+    def events(self) -> list[tuple[int, int]]:
+        return self.transport.events()
+
+    def i2c_scan(self, sda: int, scl: int) -> tuple[list[str], list[str]]:
+        self.transport.require_caps("i2c")
+        return self.transport.i2c_scan(sda, scl)
+
+    def blink(self, pin: int, count: int = 3) -> None:
+        """Slow on/off pulses on one GPIO (LEDs, buzzers, relays); the firmware releases it after."""
+        if not self.armed:
+            raise ProtocolError("not armed")
+        self.transport.require_caps("blink")
+        self.transport.blink(pin, count)
+
+    def release_pin(self, pin: int) -> None:
+        """Stop driving a probed GPIO (it goes back to an input)."""
+        if not self.armed:
+            raise ProtocolError("not armed")
+        self.transport.release(pin)
+        self._positions.pop(GPIO_BASE + pin, None)
+
     def start(self, channel: int, pulse_us: int) -> None:
         """Begin output on a channel at an explicitly chosen pulse.
 
@@ -222,7 +259,11 @@ class Controller:
             raise ProtocolError(f"channel {channel} is already started")
         if self._heartbeat is not None:
             self._heartbeat.check()
-        if "start" in self.caps:
+        if channel >= GPIO_BASE:  # a GPIO pin driven directly (PROBE)
+            self.transport.require_caps("probe")
+            if self.transport.probe(channel - GPIO_BASE, int(pulse_us)) != channel:
+                raise ProtocolError(f"firmware put GPIO {channel - GPIO_BASE} on another channel")
+        elif "start" in self.caps:
             self.transport.start(channel, int(pulse_us))
         else:  # v0.1 firmware has no START; its first MOVE plays the same role
             self.transport.move_us(channel, int(pulse_us))

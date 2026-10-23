@@ -7,7 +7,11 @@
 // Protocol lines are passed to the real core (rp_core.cpp). Lines starting
 // with '@' control the simulation:
 //   @TICK <ms>          set the clock to <ms> and run Core::tick   -> SIM t=<ms>
-//   @OUT channel=<c>    what the output driver last did on <c>    -> SIM out=<us|off>
+//   @OUT channel=<c>    what the output driver last did on <c>    -> SIM out=<us|high|low|off>
+//                       (channel 0..15 PCA9685, 100+N GPIO N)
+//   @PIN <g> open       detach whatever is on GPIO <g>            -> SIM pin=<g>
+//   @PIN <g> <mv> <ohm> GPIO <g> sees <mv> through <ohm>          -> SIM pin=<g>
+//                       (fake_board.h; e.g. a button press is 0 mV via 0 ohm)
 //   @DRIVER fail|ok     make the next driver calls fail or succeed -> SIM driver=<fail|ok>
 //   @ESTOP_PIN          trip the hardware e-stop input             -> SIM estop_pin=1
 //   @RAW <bytes>        feed <bytes> plus '\n' through LineBuffer  -> reply or SIM pending
@@ -17,30 +21,54 @@
 #include <iostream>
 #include <string>
 
+#include "fake_board.h"
 #include "rp_core.h"
 
 namespace {
 
+constexpr int kHigh = -3;
+constexpr int kLow = -2;
+
 class RecordingDriver : public rp::OutputDriver {
  public:
-  int pulse[rp::kChannels];
+  int out[rp::kSlots];
+  bool pwm[rp::kSlots];
   bool fail = false;
 
   RecordingDriver() {
-    for (int i = 0; i < rp::kChannels; ++i) pulse[i] = -1;
+    for (int i = 0; i < rp::kSlots; ++i) {
+      out[i] = -1;
+      pwm[i] = false;
+    }
   }
   bool available() override { return true; }
-  bool writePulseUs(uint8_t channel, uint16_t pulse_us) override {
+  const char *startProblem(uint8_t slot) override {
+    if (slot < rp::kChannels || pwm[slot]) return nullptr;
+    int used = 0;
+    for (int i = rp::kChannels; i < rp::kSlots; ++i) used += pwm[i] ? 1 : 0;
+    return used >= sim::kMaxPwm ? "no_pwm_slot" : nullptr;
+  }
+  bool writePulseUs(uint8_t slot, uint16_t pulse_us) override {
     if (fail) return false;
-    pulse[channel] = pulse_us;
+    out[slot] = pulse_us;
+    pwm[slot] = true;
     return true;
   }
-  bool release(uint8_t channel) override {
-    pulse[channel] = -1;
+  bool writeLevel(uint8_t slot, bool high) override {
+    if (fail) return false;
+    out[slot] = high ? kHigh : kLow;
+    return true;
+  }
+  bool release(uint8_t slot) override {
+    out[slot] = -1;
+    pwm[slot] = false;
     return !fail;
   }
   bool releaseAll() override {
-    for (int i = 0; i < rp::kChannels; ++i) pulse[i] = -1;
+    for (int i = 0; i < rp::kSlots; ++i) {
+      out[i] = -1;
+      pwm[i] = false;
+    }
     return !fail;
   }
 };
@@ -49,10 +77,13 @@ class RecordingDriver : public rp::OutputDriver {
 
 int main() {
   RecordingDriver driver;
-  rp::Core core(driver, "reference-emulator", "emulated", rp::kDefaultWatchdogMs);
+  sim::FakeBoard board;
+  sim::FakeI2c bus;
+  rp::Core core(driver, board, "reference-emulator", "emulated", rp::kDefaultWatchdogMs);
   rp::LineBuffer buffer;
   uint32_t now = 0;
   core.begin(now);
+  core.findI2c(bus);
   char reply[rp::kReplyMax];
   std::string line;
   while (std::getline(std::cin, line)) {
@@ -63,13 +94,25 @@ int main() {
       std::printf("SIM t=%lu\n", static_cast<unsigned long>(now));
     } else if (line.rfind("@OUT channel=", 0) == 0) {
       int channel = std::atoi(line.c_str() + 13);
-      if (channel < 0 || channel >= rp::kChannels) {
+      int slot = channel < rp::kChannels ? channel : rp::kChannels + channel - rp::kGpioBase;
+      if (channel < 0 || slot < 0 || slot >= rp::kSlots) {
         std::printf("SIM out=bad_channel\n");
-      } else if (driver.pulse[channel] < 0) {
+      } else if (driver.out[slot] == kHigh || driver.out[slot] == kLow) {
+        std::printf("SIM out=%s\n", driver.out[slot] == kHigh ? "high" : "low");
+      } else if (driver.out[slot] < 0) {
         std::printf("SIM out=off\n");
       } else {
-        std::printf("SIM out=%d\n", driver.pulse[channel]);
+        std::printf("SIM out=%d\n", driver.out[slot]);
       }
+    } else if (line.rfind("@PIN ", 0) == 0) {
+      int gpio = 0, mv = 0, ohms = 0;
+      char word[8] = {0};
+      if (std::sscanf(line.c_str() + 5, "%d %d %d", &gpio, &mv, &ohms) == 3) {
+        board.set(gpio, mv, ohms);
+      } else if (std::sscanf(line.c_str() + 5, "%d %7s", &gpio, word) == 2 && std::strcmp(word, "open") == 0) {
+        board.open(gpio);
+      }
+      std::printf("SIM pin=%d\n", gpio);
     } else if (line == "@DRIVER fail" || line == "@DRIVER ok") {
       driver.fail = line == "@DRIVER fail";
       std::printf("SIM driver=%s\n", driver.fail ? "fail" : "ok");

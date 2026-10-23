@@ -153,3 +153,86 @@ def test_start_value_follows_last_position_without_a_map(tmp_path):
         assert app.controller.transport.connection.device.write_log[-1] == (0, 1350)
     finally:
         app.close()
+
+
+def test_find_servos_then_range_of_motion(tmp_path):
+    """Step 1 discover + watch, step 2 identify (button, servo, LED, a driven pin never offered),
+    save the map, step 3 shows only the named servos."""
+    if sys.platform.startswith("linux") and not os.environ.get("DISPLAY"):
+        pytest.skip("no X display (run under xvfb-run)")
+    try:
+        root = tk.Tk()
+    except tk.TclError as exc:
+        pytest.skip(f"Tk cannot open a window here: {exc}")
+    root.withdraw()
+    import time
+
+    from robo_prober.map_schema import load_map
+    from robo_prober.rom_gui import NO_ROWS_TEXT, RomApp
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    app.wiggle_slew_us_s = 2000
+    try:
+        assert app.rows == {} and app.no_rows.cget("text") == NO_ROWS_TEXT
+        app.discover()
+        device = app.controller.transport.connection.device
+        assert "PCA9685 at 0x40 on SDA 8 / SCL 9" in app.survey_var.get()
+        assert device.write_log == [] and not app.armed
+        app.watch_var.set(True)
+        app.toggle_watch()
+        device.board.set_source(6, 0, 0)          # a button press
+        for _ in range(8):
+            app.tick()
+        assert app.pressed == {6}
+        app.watch_var.set(False)
+        app.toggle_watch()
+
+        assert app.current_target().key == "GPIO 6"          # buttons are named first
+        app.name_var.set("e button")
+        app.save_name()
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        assert app.armed and app.session is None, app.last_error
+        keys = [t.key for t in app._identify_targets()]
+        assert "GPIO 7" not in keys                           # driven by something else: never offered
+        while app.current_target().key != "GPIO 4":
+            app.skip_target()
+        app.start_var.set("1500")
+        app.delta_var.set("60")
+        app.do_wiggle()
+        for _ in range(400):
+            app.tick(0.05)
+            time.sleep(0.005)
+            if app.wiggle is None:
+                break
+        assert app.wiggle is None and app.answer_row.winfo_manager() == "grid", app.last_error
+        pulses = [p for ch, p in device.write_log if ch == 104]
+        assert (pulses[0], max(pulses), min(pulses), pulses[-1]) == (1500, 1560, 1440, 1500)
+        assert device.output(104) is None                     # released after the wiggle
+        app.answer("servo")
+        app.name_var.set("shoulder")
+        app.save_name()
+        while app.current_target().key != "GPIO 5":
+            app.skip_target()
+        app.do_blink()
+        assert device.level_log[0] == (105, True)
+        app.answer("led")
+        app.name_var.set("status LED")
+        app.save_name()
+        app.answer("unused")                                   # next pin: nothing happened
+        assert [i.kind for i in app.found.values()] == ["button", "servo", "led", "unused"]
+
+        path = tmp_path / "found.map.json"
+        app.go_to_rom(path)
+        assert not app.armed and device.output(104) is None
+        saved = load_map(path)
+        assert saved["joints"]["shoulder"]["channel"] == 104
+        assert saved["devices"]["e_button"]["kind"] == "button"
+        assert set(app.rows) == {104}                          # only the named servo
+        assert app.rows[104]["frame"].cget("text") == "shoulder  (GPIO 4)"
+        app.connect_and_arm()
+        app.enable(104)
+        assert device.write_log[-1] == (104, 1500)              # starts where the wiggle left it
+        app.estop()
+        assert device.output(104) is None and app.estop_latched
+    finally:
+        app.close()

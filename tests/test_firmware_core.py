@@ -32,6 +32,13 @@ def run_model(lines):
         elif line.startswith("@OUT channel="):
             pulse = device.output(int(line.split("=")[1]))
             out.append("SIM out=" + ("off" if pulse is None else str(pulse)))
+        elif line.startswith("@PIN "):
+            parts = line.split()
+            if parts[2] == "open":
+                device.board.open_pin(int(parts[1]))
+            else:
+                device.board.set_source(int(parts[1]), int(parts[2]), int(parts[3]))
+            out.append(f"SIM pin={parts[1]}")
         elif line in ("@DRIVER fail", "@DRIVER ok"):
             device.driver_fails = line.endswith("fail")
             out.append("SIM driver=" + ("fail" if device.driver_fails else "ok"))
@@ -101,7 +108,8 @@ ANY = None
 # compiled firmware core and must produce identical replies.
 SCENARIOS = {
     "boot_and_arm": [
-        ("HELLO", has("mode=disarmed", "caps=limit,status,hb,token,estop,start", "watchdog_ms=1000", "fault=none")),
+        ("HELLO", has("mode=disarmed", "caps=limit,status,hb,token,estop,start,survey,watch,i2c,probe,blink",
+                      "watchdog_ms=1000", "fault=none", "i2c=8,9", "pca9685=0x40")),
         (out(0), OFF),
         (move(0, 1500, 1), err("disarmed")),
         (start(0, 1500), err("disarmed")),
@@ -246,6 +254,75 @@ SCENARIOS = {
         ("LIMIT channel=2 min_us=1000 neutral_us=1500 max_us=2000", has("RP1 OK")),
         (ARM, ANY), (tick(5000), ANY),                           # watchdog
         ("STATUS channel=2", has("min_us=1400", "max_us=1600")),
+    ],
+    "survey_is_read_only": [
+        ("BOARD", has("board=esp32_s3_chip_reference", "chip=ESP32-S3", "pins=0,1,2,3,4,5,6,7,10,")),
+        ("SURVEY pin=4", "RP1 OK pin=4 class=floating adc=0"),          # servo signal input
+        ("SURVEY pin=5", has("class=pulled_down")),                     # LED to GND: resistive
+        ("SURVEY pin=6", has("class=pulled_up", "adc=3300")),           # button with pull-up
+        ("SURVEY pin=7", has("class=driven_low")),                      # another chip's output
+        ("SURVEY pin=8", has("class=reserved")),                        # the PCA9685 bus
+        ("SURVEY pin=19", has("class=reserved")),                       # USB D-: never touched
+        ("@PIN 21 3300 10000", ANY), ("SURVEY pin=21", has("class=driven_high")),  # no ADC: no proof
+        ("SURVEY pin=49", err("bad_pin")), ("SURVEY", err("bad_fields")),
+        (out(104), OFF), (out(105), OFF), (out(107), OFF),
+    ],
+    "i2c_scan": [
+        ("I2C_SCAN sda=8 scl=9", "RP1 OK devices=0x40,0x70 pca9685=0x40"),
+        ("I2C_SCAN sda=9 scl=8", "RP1 OK devices=none pca9685=none"),
+        ("I2C_SCAN sda=6 scl=4", "RP1 OK devices=none pca9685=none"),
+        ("I2C_SCAN sda=8 scl=4", err("pin_claimed")),
+        ("I2C_SCAN sda=19 scl=4", err("pin_reserved")),
+        ("I2C_SCAN sda=4 scl=4", err("bad_pin")),
+        (ARM, ANY), (start(0, 1500), "RP1 OK channel=0 started_us=1500"),  # the driver bus still works
+    ],
+    "watch_events": [
+        ("EVENTS", "RP1 OK events=none"),
+        ("WATCH state=maybe", err("bad_fields")), ("WATCH state=on", "RP1 OK watch=1"),
+        ("@PIN 6 0 0", ANY), (tick(100), ANY), ("@PIN 6 3300 10000", ANY), (tick(200), ANY),
+        ("@PIN 12 0 0", ANY), (tick(300), ANY),                           # a button to GND on a floating pin
+        ("EVENTS", "RP1 OK events=6:0,6:1,12:0"), ("EVENTS", "RP1 OK events=none"),
+        (tick(5000), ANY), ("@PIN 6 0 0", ANY), (tick(5400), ANY),
+        ("EVENTS", "RP1 OK events=none"),                                 # idle 5 s: watch switched off
+        ("WATCH state=on", ANY), ("WATCH state=off", "RP1 OK watch=0"),
+    ],
+    "probe_safety": [
+        (f"PROBE pin=4 mode=servo start_us=1500 token={TOKEN}", err("not_armed")),
+        (f"BLINK pin=5 count=1 token={TOKEN}", err("not_armed")),
+        (ARM, ANY),
+        (f"PROBE pin=7 mode=servo start_us=1500 token={TOKEN}", err("pin_driven")),   # never driven
+        (f"BLINK pin=7 count=1 token={TOKEN}", err("pin_driven")),
+        (out(107), OFF),
+        (f"PROBE pin=8 mode=servo start_us=1500 token={TOKEN}", err("pin_claimed")),  # I2C bus
+        (f"PROBE pin=19 mode=servo start_us=1500 token={TOKEN}", err("pin_reserved")),
+        (f"PROBE pin=46 mode=servo start_us=1500 token={TOKEN}", err("pin_reserved")),  # input only
+        (f"PROBE pin=4 mode=servo start_us=1700 token={TOKEN}", err("out_of_limits")),
+        (f"PROBE pin=4 mode=blink start_us=1500 token={TOKEN}", err("bad_fields")),
+        (f"PROBE pin=4 mode=servo start_us=1500 token=other", err("bad_token")),
+        (out(104), OFF),
+        (f"PROBE pin=4 mode=servo start_us=1500 token={TOKEN}", "RP1 OK pin=4 channel=104"),
+        (out(104), "SIM out=1500"),
+        (f"PROBE pin=4 mode=servo start_us=1500 token={TOKEN}", err("pin_claimed")),
+        (move(104, 1560, 1), ANY), (tick(300), ANY),
+        ("STATUS channel=104", has("active=1", "current_us=1560")), (out(104), "SIM out=1560"),
+        (move(104, 1700, 2), err("out_of_limits")),
+        (f"RELEASE pin=4 token={TOKEN}", "RP1 OK pin=4 released=1"), (out(104), OFF),
+        ("STATUS channel=104", has("active=0")),
+        (start(104, 1500), err("bad_channel")),
+        (f"BLINK pin=5 count=2 token={TOKEN}", "RP1 OK pin=5 blinked=2"), (out(105), "SIM out=high"),
+        (move(105, 1500, 3), err("pin_claimed")),
+        (tick(550), ANY), (out(105), "SIM out=low"), (tick(800), ANY), (out(105), "SIM out=high"),
+        (f"HB token={TOKEN}", ANY), (tick(1050), ANY), (out(105), "SIM out=low"),
+        (tick(1300), ANY), (out(105), OFF),                                # done: released
+        (f"BLINK pin=5 count=11 token={TOKEN}", err("bad_fields")),
+        (f"BLINK pin=6 count=1 token={TOKEN}", has("RP1 OK")), ("STOP", ANY), (out(106), OFF),
+        (ARM, ANY),
+    ] + [(f"PROBE pin={pin} mode=servo start_us=1500 token={TOKEN}", has("RP1 OK"))
+         for pin in (1, 2, 3, 4, 10, 11, 12, 13)] + [
+        (f"PROBE pin=14 mode=servo start_us=1500 token={TOKEN}", err("no_pwm_slot")),
+        ("DISARM", ANY), (out(101), OFF), (out(113), OFF),
+        (ARM, ANY), (f"PROBE pin=14 mode=servo start_us=1500 token={TOKEN}", has("RP1 OK")),
+        ("ESTOP", ANY), (out(114), OFF),
     ],
     "driver_fault": [
         (ARM, ANY), ("@DRIVER fail", ANY), (start(0, 1550), err("driver_error")),

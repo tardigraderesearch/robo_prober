@@ -56,7 +56,8 @@ def build_bench(firmware_dir: Path | None = None, cache_dir: Path | None = None)
     """Compile the bench (cached by source hash) and return the executable."""
     firmware_dir = Path(firmware_dir or REPO_FIRMWARE)
     sources = [firmware_dir / "src" / "rp_core.cpp", firmware_dir / "test" / "native" / "bench_main.cpp"]
-    headers = [firmware_dir / "src" / "rp_core.h"]
+    headers = [firmware_dir / "src" / "rp_core.h", firmware_dir / "src" / "pin_profiles.h",
+               firmware_dir / "test" / "native" / "fake_board.h"]
     missing = [str(p) for p in sources + headers if not p.is_file()]
     if missing:
         raise BenchError("firmware sources not found (use a source checkout): " + ", ".join(missing))

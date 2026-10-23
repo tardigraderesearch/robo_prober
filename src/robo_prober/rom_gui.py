@@ -1,9 +1,15 @@
-"""Range-of-motion window (tkinter + ttk).
+"""The robo-prober window (tkinter + ttk), in three steps:
 
-One row per servo channel: a confirmed start pulse with an Enable button, a
-slider the servo follows slowly, "Set ROM 1" and "Set ROM 2", Clear and
-Widen. All logic lives in rom.py and api.py; this file only wires widgets to
-them.
+1. Discover: read-only survey of the controller's pins and I2C bus, and a
+   button watch.
+2. Identify: one pin (or PCA9685 channel) at a time, wiggle it as a servo
+   or blink it, say what happened and name it; save the hardware map.
+3. Range of motion: one row per named servo: a confirmed start pulse with an
+   Enable button, a slider the servo follows slowly, "Set ROM 1" and
+   "Set ROM 2", Clear and Widen.
+
+The connection bar and the E-STOP stay visible above all three. All logic
+lives in find.py, rom.py and api.py; this file only wires widgets to them.
 """
 from __future__ import annotations
 
@@ -12,8 +18,9 @@ from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from . import __version__, theme
+from . import __version__, find, theme
 from .api import EMULATOR_PORT, Controller, connect, discover, load_map, save_map
+from .transport import ProtocolError
 from .rom import (
     ABS_MAX_US,
     ABS_MIN_US,
@@ -23,6 +30,7 @@ from .rom import (
     RomError,
     RomSession,
     apply_rom_to_map,
+    channel_name,
     channels_from_map,
     set_last_positions,
 )
@@ -32,6 +40,10 @@ STRIP_H = 16
 ESTOP_BG = "#d50000"
 ESTOP_ACTIVE = "#ff1744"
 EMULATOR_LABEL = "Built-in emulator (no hardware)"
+NO_ROWS_TEXT = "Find servos first (steps 1 and 2), or open a saved map."
+CLASS_TEXT = {"floating": "floating (nothing, or a servo/LED input)", "pulled_up": "pulled up (resistor: button, I2C)",
+              "pulled_down": "pulled down (resistor, LED)", "driven_high": "DRIVEN high by something: never driven",
+              "driven_low": "DRIVEN low by something: never driven", "reserved": "reserved"}
 SOURCE_TEXT = {"last_position": "last saved position", "rom_midpoint": "middle of the saved range",
                "operator": "your value", "none": "no saved position - check this value"}
 
@@ -42,9 +54,9 @@ class RomApp:
                  band_half_us: int = DEFAULT_BAND_HALF_US, host_slew_us_s: int = DEFAULT_HOST_SLEW_US_S,
                  connect_fn: Callable[..., Controller] = connect, run_timer: bool = True):
         self.root = root
-        root.title(f"robo-prober {__version__} - range of motion")
+        root.title(f"robo-prober {__version__}")
         root.minsize(560, 420)
-        root.geometry("1000x760")
+        root.geometry("1000x800")
         self.connect_fn = connect_fn
         self.band_half_us = band_half_us
         self.host_slew_us_s = host_slew_us_s
@@ -59,19 +71,36 @@ class RomApp:
         self.last_error: str | None = None
         self.estop_latched = False
         self._closed = False
+        # find servos (steps 1 and 2)
+        self.survey: find.Survey | None = None
+        self.found: dict[str, find.Found] = {}
+        self.skipped: set[str] = set()
+        self.pressed: set[int] = set()
+        self.wiggle: find.Wiggle | None = None
+        self.last_action = ""
+        self.pending_kind = ""
+        self._watch_ticks = 0
+        self._found_path: Path | None = None
+        self.wiggle_slew_us_s = find.DEFAULT_WIGGLE_SLEW_US_S
 
         self.port_var = tk.StringVar(value=EMULATOR_LABEL if port == EMULATOR_PORT else (port or ""))
         self.cutoff_var = tk.BooleanVar(value=False)
         self.operator_var = tk.StringVar(value=operator)
         self.map_var = tk.StringVar(value="No hardware map loaded (channels 0-15)")
-        self.status = tk.StringVar(value="Pick a port, confirm the power cutoff, then Connect & arm.")
+        self.status = tk.StringVar(value="Pick a port and press Discover (nothing moves), or open a saved map.")
+        self.watch_var = tk.BooleanVar(value=False)
+        self.start_var = tk.StringVar(value=str(find.DEFAULT_START_US))
+        self.delta_var = tk.StringVar(value=str(find.DEFAULT_DELTA_US))
+        self.name_var = tk.StringVar()
+        self.survey_var = tk.StringVar(value="Not discovered yet. Press Discover: it only reads the pins.")
+        self.target_var = tk.StringVar(value="Discover first.")
 
         self._build()
         self.refresh_ports()
         if map_path is not None:
             self.load_map_file(Path(map_path))
         else:
-            self._set_channels([RomChannel(ch, band_half_us=band_half_us) for ch in (channels or range(16))])
+            self._set_channels([RomChannel(ch, band_half_us=band_half_us) for ch in (channels or [])])
         if run_timer:
             root.after(TICK_MS, self._timer)
 
@@ -83,7 +112,7 @@ class RomApp:
         # window controls (tiling desktops often draw no title bar)
         header = ttk.Frame(root, padding=(12, 10, 12, 0))
         header.pack(fill="x")
-        ttk.Label(header, text="robo-prober - range of motion", style="Title.TLabel").pack(side="left")
+        ttk.Label(header, text="robo-prober", style="Title.TLabel").pack(side="left")
         ttk.Button(header, text="✕", style="Close.TButton", width=3,
                    command=self.request_close).pack(side="right")
         ttk.Button(header, text="▢", style="Chrome.TButton", width=3,
@@ -125,9 +154,18 @@ class RomApp:
                                    font=("TkDefaultFont", 18, "bold"), width=8, height=2, relief="raised", bd=4)
         self.estop_btn.grid(row=0, column=3, rowspan=3, sticky="ne", padx=(12, 0))
 
-        # 2. hardware map
-        maprow = ttk.LabelFrame(outer, text="Hardware map", padding=(10, 6))
-        maprow.grid(row=1, column=0, sticky="ew", pady=(10, 8))
+        # steps: 1 discover, 2 identify, 3 range of motion
+        self.steps = ttk.Notebook(outer)
+        self.steps.grid(row=1, column=0, rowspan=2, sticky="nsew", pady=(10, 0))
+        self._build_discover(ttk.Frame(self.steps, padding=10))
+        self._build_identify(ttk.Frame(self.steps, padding=10))
+        rom_tab = ttk.Frame(self.steps, padding=(4, 8))
+        self.steps.add(rom_tab, text="3. Range of motion")
+        rom_tab.columnconfigure(0, weight=1)
+        rom_tab.rowconfigure(2, weight=1)
+
+        maprow = ttk.LabelFrame(rom_tab, text="Hardware map", padding=(10, 6))
+        maprow.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         maprow.columnconfigure(1, weight=1)
         ttk.Button(maprow, text="Open map...", command=self.browse_map).grid(row=0, column=0, sticky="w")
         ttk.Label(maprow, textvariable=self.map_var, style="Muted.TLabel").grid(row=0, column=1, sticky="w", padx=8)
@@ -135,9 +173,11 @@ class RomApp:
         ttk.Entry(maprow, textvariable=self.operator_var, width=14).grid(row=0, column=3, padx=6)
         self.save_btn = ttk.Button(maprow, text="Save ROM to map", command=self.save)
         self.save_btn.grid(row=0, column=4)
+        self.no_rows = ttk.Label(rom_tab, text=NO_ROWS_TEXT, style="Big.TLabel")
+        self.no_rows.grid(row=1, column=0, sticky="w", padx=6, pady=(0, 6))
 
-        # 3. channel rows (scrollable, so they stay usable in a small tiled window)
-        box = ttk.LabelFrame(outer, text="Channels", padding=(6, 4))
+        # channel rows (scrollable, so they stay usable in a small tiled window)
+        box = ttk.LabelFrame(rom_tab, text="Servos", padding=(6, 4))
         box.grid(row=2, column=0, sticky="nsew")
         box.columnconfigure(0, weight=1)
         box.rowconfigure(0, weight=1)
@@ -156,7 +196,80 @@ class RomApp:
 
         self.status_label = ttk.Label(outer, textvariable=self.status, wraplength=900)
         self.status_label.grid(row=3, column=0, sticky="ew", pady=(8, 0))
+        self._refresh_identify()
         outer.bind("<Configure>", lambda e: self.status_label.configure(wraplength=max(e.width - 24, 200)))
+
+    def _build_discover(self, tab: ttk.Frame) -> None:
+        self.steps.add(tab, text="1. Discover")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(2, weight=1)
+        bar = ttk.Frame(tab)
+        bar.grid(row=0, column=0, sticky="ew")
+        self.discover_btn = ttk.Button(bar, text="Discover", style="Accent.TButton", command=self.discover)
+        self.discover_btn.pack(side="left")
+        ttk.Checkbutton(bar, text="Watch buttons (press them now)", variable=self.watch_var,
+                        command=self.toggle_watch).pack(side="left", padx=12)
+        ttk.Label(tab, textvariable=self.survey_var, wraplength=900).grid(row=1, column=0, sticky="w", pady=8)
+        self.pin_table = ttk.Treeview(tab, columns=("pin", "class", "adc", "note"), show="headings", height=12)
+        for column, title, width in (("pin", "Pin", 70), ("class", "What the survey saw", 330),
+                                     ("adc", "ADC mV", 80), ("note", "Note", 380)):
+            self.pin_table.heading(column, text=title, anchor="w")
+            self.pin_table.column(column, width=width, anchor="w", stretch=column == "note")
+        self.pin_table.grid(row=2, column=0, sticky="nsew")
+
+    def _build_identify(self, tab: ttk.Frame) -> None:
+        self.steps.add(tab, text="2. Identify")
+        tab.columnconfigure(0, weight=1)
+        tab.rowconfigure(5, weight=1)
+        ttk.Label(tab, textvariable=self.target_var, style="Big.TLabel", wraplength=900).grid(
+            row=0, column=0, sticky="w")
+        values = ttk.Frame(tab)
+        values.grid(row=1, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(values, text="Start").pack(side="left")
+        ttk.Spinbox(values, from_=ABS_MIN_US, to=ABS_MAX_US, increment=10, width=7,
+                    textvariable=self.start_var).pack(side="left", padx=4)
+        ttk.Label(values, text="us   wiggle +/-").pack(side="left")
+        ttk.Spinbox(values, from_=10, to=400, increment=10, width=5, textvariable=self.delta_var).pack(
+            side="left", padx=4)
+        ttk.Label(values, text="us").pack(side="left")
+        self.start_var.trace_add("write", lambda *_: self._refresh_identify())
+        self.delta_var.trace_add("write", lambda *_: self._refresh_identify())
+
+        actions = ttk.Frame(tab)
+        actions.grid(row=2, column=0, sticky="w", pady=(8, 0))
+        self.wiggle_btn = ttk.Button(actions, text="Wiggle as servo", style="Accent.TButton", command=self.do_wiggle)
+        self.blink_btn = ttk.Button(actions, text="Blink", command=self.do_blink)
+        self.skip_btn = ttk.Button(actions, text="Skip", command=self.skip_target)
+        self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop_identify)
+        for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.stop_btn):
+            widget.pack(side="left", padx=(0, 6))
+
+        self.answer_row = ttk.Frame(tab)
+        self.answer_row.grid(row=3, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(self.answer_row, text="What happened?", style="Big.TLabel").pack(side="left", padx=(0, 8))
+        for text, kind in (("Servo moved", "servo"), ("Light / sound", "led"), ("Nothing", "unused"),
+                           ("Try again", "again")):
+            ttk.Button(self.answer_row, text=text, command=lambda k=kind: self.answer(k)).pack(side="left", padx=(0, 6))
+        self.name_row = ttk.Frame(tab)
+        self.name_row.grid(row=4, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(self.name_row, text="What is it?", style="Big.TLabel").pack(side="left", padx=(0, 8))
+        self.name_entry = ttk.Entry(self.name_row, textvariable=self.name_var, width=24)
+        self.name_entry.pack(side="left")
+        self.name_entry.bind("<Return>", lambda e: self.save_name())
+        ttk.Button(self.name_row, text="Save", style="Accent.TButton", command=self.save_name).pack(side="left", padx=6)
+
+        self.found_table = ttk.Treeview(tab, columns=("target", "what", "name"), show="headings", height=8)
+        for column, title, width in (("target", "Pin / channel", 160), ("what", "What", 140), ("name", "Name", 300)):
+            self.found_table.heading(column, text=title, anchor="w")
+            self.found_table.column(column, width=width, anchor="w", stretch=column == "name")
+        self.found_table.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
+        bottom = ttk.Frame(tab)
+        bottom.grid(row=6, column=0, sticky="w", pady=(8, 0))
+        self.save_map_btn = ttk.Button(bottom, text="Save hardware map", command=self.save_found_map)
+        self.save_map_btn.pack(side="left")
+        self.to_rom_btn = ttk.Button(bottom, text="Go to range of motion", style="Accent.TButton",
+                                     command=self.go_to_rom)
+        self.to_rom_btn.pack(side="left", padx=6)
 
     def _set_channels(self, roms: list[RomChannel]) -> None:
         for row in self.rows.values():
@@ -165,10 +278,15 @@ class RomApp:
         self.rows = {}
         for index, rom in enumerate(roms):
             self.rows[rom.channel] = self._build_row(index, rom)
+        if roms:
+            self.no_rows.grid_remove()
+        else:
+            self.no_rows.grid()
         self._refresh_all()
 
     def _build_row(self, index: int, rom: RomChannel) -> dict[str, Any]:
-        frame = ttk.LabelFrame(self.rows_frame, text=f"ch {rom.channel}  {rom.label}", padding=(10, 6))
+        title = rom.label if rom.label == channel_name(rom.channel) else f"{rom.label}  ({channel_name(rom.channel)})"
+        frame = ttk.LabelFrame(self.rows_frame, text=title, padding=(10, 6))
         frame.grid(row=index, column=0, sticky="ew", padx=2, pady=4)
         self.rows_frame.columnconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
@@ -218,10 +336,13 @@ class RomApp:
     # ---------------------------------------------------------------- state
     @property
     def armed(self) -> bool:
-        return self.session is not None and self.session.started and self.controller is not None and self.controller.armed
+        return self.controller is not None and self.controller.armed
+
+    def _rom_started(self) -> bool:
+        return self.armed and self.session is not None and self.session.started
 
     def _enabled(self, channel: int) -> bool:
-        return self.armed and channel in self.session.enabled
+        return self._rom_started() and channel in self.session.enabled
 
     def _say(self, text: str, error: bool = False) -> None:
         self.status.set(text)
@@ -242,6 +363,8 @@ class RomApp:
         self.disarm_btn.state(["!disabled"] if armed else ["disabled"])
         self.clear_estop_btn.state(["!disabled"] if self.estop_latched else ["disabled"])
         self.save_btn.state(["!disabled"] if self.hardware_map is not None else ["disabled"])
+        if hasattr(self, "wiggle_btn"):
+            self._refresh_identify()
 
     def _refresh_row(self, channel: int) -> None:
         if channel not in self.rows:
@@ -253,7 +376,7 @@ class RomApp:
         enabled = self._enabled(channel)
         row["scale"].configure(state="normal" if enabled else "disabled")
         row["start_entry"].state(["disabled"] if enabled else ["!disabled"])
-        row["enable"].state(["!disabled"] if self.armed and not enabled else ["disabled"])
+        row["enable"].state(["!disabled"] if self._rom_started() and not enabled else ["disabled"])
         if enabled:
             row["warning"].configure(text="")
         else:
@@ -328,31 +451,346 @@ class RomApp:
         self._set_channels(roms)
         self._say(f"Loaded {len(roms)} channel(s) from {path.name}.")
 
+    def _port(self) -> str | None:
+        port = self.port_var.get().strip()
+        if not port:
+            self._say("Pick a serial port (or the built-in emulator).", error=True)
+            return None
+        return EMULATOR_PORT if port == EMULATOR_LABEL else port
+
+    def _ensure_connected(self) -> bool:
+        if self.controller is not None:
+            return True
+        port = self._port()
+        if port is None:
+            return False
+        try:
+            self.controller = self.connect_fn(port)
+        except Exception as error:  # noqa: BLE001 - shown to the operator
+            self._say(f"Could not connect: {error}", error=True)
+            return False
+        return True
+
     def connect_and_arm(self) -> None:
         if self.armed:
             return
         if not self.cutoff_var.get():
             self._say("Confirm that a physical power cutoff is within reach first.", error=True)
             return
-        port = self.port_var.get().strip()
-        if not port:
-            self._say("Pick a serial port (or the built-in emulator).", error=True)
+        if not self._ensure_connected():
             return
         try:
-            if self.controller is None:
-                self.controller = self.connect_fn(EMULATOR_PORT if port == EMULATOR_LABEL else port)
             # Heartbeats come from the window's own timer: if the window freezes,
             # the firmware watchdog releases everything.
-            self.session = RomSession(self.controller, self.roms.values(), host_slew_us_s=self.host_slew_us_s,
-                                      heartbeat="manual")
-            self.session.start(power_cutoff_confirmed=True)
+            if self.roms:
+                self.session = RomSession(self.controller, self.roms.values(), host_slew_us_s=self.host_slew_us_s,
+                                          heartbeat="manual")
+                self.session.start(power_cutoff_confirmed=True)
+            else:
+                self.session = None
+                self.controller.arm(power_cutoff_confirmed=True, heartbeat="manual")
         except Exception as error:  # noqa: BLE001 - shown to the operator
             self._drop_connection()
             self._say(f"Could not arm: {error}", error=True)
             self._refresh_all()
             return
-        self._say("Armed. No channel outputs anything yet: check each start value, then press Enable.")
+        if self.roms:
+            self._say("Armed. No servo outputs anything yet: check each start value, then press Enable.")
+        else:
+            self._say("Armed. Nothing outputs yet. In step 2, wiggle or blink one pin at a time.")
         self._refresh_all()
+
+    # ------------------------------------------------------------ 1. discover
+    def discover(self) -> None:
+        if not self._ensure_connected():
+            return
+        try:
+            self.survey = find.discover(self.controller)
+        except Exception as error:  # noqa: BLE001
+            self._say(f"Discover failed: {error}", error=True)
+            return
+        self.survey_var.set(self.survey.summary())
+        self._refresh_pin_table()
+        self._refresh_identify()
+        self._say("Discovered (nothing was driven). Tick 'Watch buttons' and press any buttons, "
+                  "or confirm the power cutoff, Connect & arm, and go to step 2.")
+
+    def _refresh_pin_table(self) -> None:
+        table = self.pin_table
+        table.delete(*table.get_children())
+        if self.survey is None:
+            return
+        i2c_notes: dict[int, str] = {}
+        for (sda, scl), addresses in self.survey.i2c.items():
+            text = f"I2C {', '.join(addresses)} (SDA {sda} / SCL {scl})"
+            i2c_notes[sda] = i2c_notes[scl] = text
+        if self.survey.pca_bus:
+            table.insert("", "end", values=(f"{self.survey.pca_bus[0]}, {self.survey.pca_bus[1]}", "I2C bus in use",
+                                            "", i2c_notes.get(self.survey.pca_bus[0], "PCA9685")))
+        for info in self.survey.pins:
+            notes = []
+            if info.pin in self.pressed:
+                notes.append("BUTTON: changed while watching")
+            if info.pin in i2c_notes:
+                notes.append(i2c_notes[info.pin])
+            if info.last:
+                notes.append("boot strapping / JTAG: probed last")
+            if info.input_only:
+                notes.append("input only")
+            table.insert("", "end", values=(f"GPIO {info.pin}", CLASS_TEXT.get(info.cls, info.cls),
+                                            "" if info.adc_mv is None else info.adc_mv, "; ".join(notes)))
+
+    def toggle_watch(self) -> None:
+        on = self.watch_var.get()
+        if on and not self._ensure_connected():
+            self.watch_var.set(False)
+            return
+        try:
+            if self.controller is not None:
+                self.controller.watch(on)
+        except Exception as error:  # noqa: BLE001
+            self.watch_var.set(False)
+            self._say(f"Watch failed: {error}", error=True)
+            return
+        self._say("Watching: press each button now; the pins that change are listed." if on else "Watch off.")
+
+    def poll_watch(self) -> None:
+        if not self.watch_var.get() or self.controller is None:
+            return
+        try:
+            events = self.controller.events()
+        except Exception as error:  # noqa: BLE001
+            self.watch_var.set(False)
+            self._say(f"Watch stopped: {error}", error=True)
+            return
+        new = {pin for pin, _ in events} - self.pressed
+        if new:
+            self.pressed |= new
+            self._refresh_pin_table()
+            self._refresh_identify()
+            self._say("Pin(s) changed: " + ", ".join(f"GPIO {pin}" for pin in sorted(new))
+                      + ". Name them in step 2.")
+
+    # ------------------------------------------------------------ 2. identify
+    def _identify_targets(self) -> list[find.Target]:
+        buttons = [find.Target(pin, cls="button") for pin in sorted(self.pressed)]
+        if self.survey is None:
+            return buttons
+        return buttons + [t for t in find.targets(self.survey) if t.pin not in self.pressed]
+
+    def current_target(self) -> find.Target | None:
+        return next((t for t in self._identify_targets() if t.key not in self.found and t.key not in self.skipped),
+                    None)
+
+    def _wiggle_values(self) -> tuple[int, int] | None:
+        try:
+            return int(self.start_var.get()), int(self.delta_var.get())
+        except (ValueError, tk.TclError):
+            return None
+
+    def _refresh_identify(self) -> None:
+        target = self.current_target()
+        values = self._wiggle_values()
+        start, delta = values if values else ("?", "?")
+        busy = self.wiggle is not None
+        if self.survey is None and not self.pressed:
+            text = "Discover first (step 1)."
+        elif target is None:
+            text = "All pins done. Save the hardware map, then go to range of motion."
+        elif target.cls == "button":
+            text = f"{target.key} changed while you pressed buttons. What is it?"
+        else:
+            text = (f"{target.key}: it will go to {start} us, then wiggle +/-{delta} us slowly. "
+                    "Make sure it's clear." + ("  (boot-strapping pin)" if target.last else ""))
+        self.target_var.set(text)
+        can_probe = target is not None and target.cls != "button" and self.armed and not busy
+        self.wiggle_btn.state(["!disabled"] if can_probe else ["disabled"])
+        self.blink_btn.state(["!disabled"] if can_probe and target.pin is not None else ["disabled"])
+        self.skip_btn.state(["!disabled"] if target is not None and not busy else ["disabled"])
+        self.stop_btn.state(["!disabled"] if target is not None else ["disabled"])
+        asking = self.last_action and not busy and not self.pending_kind
+        if asking:
+            self.answer_row.grid()
+        else:
+            self.answer_row.grid_remove()
+        if self.pending_kind or (target is not None and target.cls == "button"):
+            self.name_row.grid()
+        else:
+            self.name_row.grid_remove()
+        self.save_map_btn.state(["!disabled"] if self._named_servos() else ["disabled"])
+        self.to_rom_btn.state(["!disabled"] if self._named_servos() else ["disabled"])
+
+    def _named_servos(self) -> bool:
+        return any(item.kind == "servo" for item in self.found.values())
+
+    def _refresh_found(self) -> None:
+        table = self.found_table
+        table.delete(*table.get_children())
+        for item in self.found.values():
+            what = {"servo": "servo", "led": "light / sound", "button": "button", "unused": "nothing"}[item.kind]
+            table.insert("", "end", values=(item.target.key, what, item.name or "-"))
+
+    def _probe_error(self, error: Exception) -> None:
+        """Refusals (driven pin, no PWM slot, ...) are messages; anything else stops everything."""
+        if isinstance(error, ProtocolError) and "returned error" in str(error):
+            self.wiggle = None
+            self.last_action = ""
+            self._say(f"Refused: {error}", error=True)
+            self._refresh_identify()
+            return
+        self.wiggle = None
+        self.last_action = ""
+        self._fault_or_say(error)
+
+    def _confirm_strapping(self, target: find.Target) -> bool:
+        if not target.last:
+            return True
+        return messagebox.askyesno(
+            "Boot-strapping pin", f"{target.key} is a boot-strapping / JTAG pin. Driving it is safe while the "
+            "board runs, but it can matter at the next reset. Probe it?", parent=self.root)
+
+    def do_wiggle(self) -> None:
+        target = self.current_target()
+        values = self._wiggle_values()
+        if target is None or not self.armed or self.wiggle is not None:
+            return
+        if values is None:
+            self._say("Enter the start pulse and the wiggle size in us.", error=True)
+            return
+        if not self._confirm_strapping(target):
+            return
+        try:
+            self.wiggle = find.Wiggle(self.controller, target, values[0], values[1], self.wiggle_slew_us_s)
+            self.wiggle.begin()
+        except ValueError as error:
+            self.wiggle = None
+            self._say(str(error), error=True)
+            return
+        except Exception as error:  # noqa: BLE001
+            self._probe_error(error)
+            return
+        self.last_action = "wiggle"
+        self._say(f"{target.key}: wiggling slowly. Watch the robot.")
+        self._refresh_identify()
+
+    def do_blink(self) -> None:
+        target = self.current_target()
+        if target is None or target.pin is None or not self.armed or self.wiggle is not None:
+            return
+        if not self._confirm_strapping(target):
+            return
+        try:
+            find.blink(self.controller, target)
+        except Exception as error:  # noqa: BLE001
+            self._probe_error(error)
+            return
+        self.last_action = "blink"
+        self._say(f"{target.key}: blinking 3 times (on/off, 2 Hz).")
+        self._refresh_identify()
+
+    def answer(self, kind: str) -> None:
+        target = self.current_target()
+        if target is None:
+            return
+        if kind == "again":
+            (self.do_blink if self.last_action == "blink" else self.do_wiggle)()
+            return
+        if kind == "unused":
+            self.found[target.key] = find.Found(target, "unused")
+            self._next_target()
+            return
+        self.pending_kind = kind
+        self.name_var.set("")
+        self._refresh_identify()
+        self.name_entry.focus_set()
+
+    def save_name(self) -> None:
+        target = self.current_target()
+        name = self.name_var.get().strip()
+        if target is None:
+            return
+        if not name:
+            self._say("Type what it is (e.g. shoulder, status LED).", error=True)
+            return
+        kind = "button" if target.cls == "button" else self.pending_kind
+        if not kind:
+            return
+        start = self._wiggle_values()[0] if kind == "servo" and self._wiggle_values() else None
+        self.found[target.key] = find.Found(target, kind, name, start)
+        self._next_target()
+
+    def skip_target(self) -> None:
+        target = self.current_target()
+        if target is not None and self.wiggle is None:
+            self.skipped.add(target.key)
+            self._next_target()
+
+    def _next_target(self) -> None:
+        self.last_action = ""
+        self.pending_kind = ""
+        self.name_var.set("")
+        self._refresh_found()
+        self._refresh_identify()
+        target = self.current_target()
+        self._say(f"Next: {target.key}." if target else "All pins done. Save the hardware map.")
+
+    def stop_identify(self) -> None:
+        """End the walk through the pins. A wiggle in progress is stopped (all outputs released)."""
+        if self.wiggle is not None and self.controller is not None:
+            self.wiggle = None
+            try:
+                self.controller.stop()
+            except Exception as error:  # noqa: BLE001
+                self._say(f"STOP not confirmed ({error}). CUT POWER NOW.", error=True)
+                self._drop_connection()
+        target = self.current_target()
+        while target is not None:
+            self.skipped.add(target.key)
+            target = self.current_target()
+        self._next_target()
+        self._refresh_all()
+
+    def _found_map(self) -> dict[str, Any]:
+        survey = self.survey or find.Survey("", "?", [])
+        return find.build_map(self.controller.info if self.controller else {}, survey, list(self.found.values()))
+
+    def save_found_map(self, path: Path | None = None) -> Path | None:
+        try:
+            hardware_map = self._found_map()
+        except Exception as error:  # noqa: BLE001
+            self._say(str(error), error=True)
+            return None
+        if path is None:
+            chosen = filedialog.asksaveasfilename(title="Save hardware map", defaultextension=".json",
+                                                  initialfile="robot.map.json",
+                                                  filetypes=[("Hardware map", "*.json")])
+            if not chosen:
+                return None
+            path = Path(chosen)
+        try:
+            save_map(hardware_map, path, overwrite=True)
+        except Exception as error:  # noqa: BLE001
+            self._say(f"Save failed: {error}", error=True)
+            return None
+        self.hardware_map, self.map_path, self._found_path = hardware_map, path, path
+        self.map_var.set(str(path))
+        self._say(f"Saved {len(hardware_map['joints'])} servo(s) and {len(hardware_map['devices'])} other part(s) "
+                  f"to {path}.")
+        return path
+
+    def go_to_rom(self, path: Path | None = None) -> None:
+        """Save the map, release everything and show only the named servos for range of motion."""
+        if self.wiggle is not None:
+            return
+        target = path or self._found_path
+        if self.save_found_map(target) is None:
+            return
+        if self.armed:
+            self.disarm()
+        self.load_map_file(self._found_path)
+        self.steps.select(2)
+        self._say("All outputs released. Connect & arm, then Enable each servo: it starts where the wiggle "
+                  "left it.")
 
     def enable(self, channel: int) -> None:
         """First output on a channel, at the start value shown in its row."""
@@ -430,8 +868,10 @@ class RomApp:
         if controller is None:
             self._say("E-STOP: nothing connected.")
             return
+        self.wiggle = None
+        self.last_action = ""
         try:
-            if self.session is not None:
+            if self.session is not None and self.session.started:
                 self.session.estop()
             else:
                 controller.estop()
@@ -457,9 +897,14 @@ class RomApp:
         self._refresh_all()
 
     def disarm(self) -> None:
-        if self.session is not None:
+        self.wiggle = None
+        self.last_action = ""
+        if self.session is not None or self.armed:
             try:
-                self.session.close()
+                if self.session is not None:
+                    self.session.close()
+                if self.armed:
+                    self.controller.disarm()
             except Exception as error:  # noqa: BLE001
                 self._say(f"Disarm failed ({error}). CUT POWER NOW.", error=True)
                 self._drop_connection()
@@ -520,6 +965,8 @@ class RomApp:
             self._say(str(error), error=True)
             return
         self._say(f"Controller error: {error}. Stopping.", error=True)
+        self.wiggle = None
+        self.last_action = ""
         try:
             if self.session is not None:
                 self.session._remember_positions()
@@ -547,12 +994,25 @@ class RomApp:
 
     def tick(self, dt_s: float = TICK_MS / 1000) -> None:
         """One slew step for every moving channel (called by the timer)."""
+        self._watch_ticks += 1
+        if self._watch_ticks % 4 == 0:
+            self.poll_watch()
         if not self.armed:
             return
         try:
-            moved = self.session.step(dt_s)
+            moved = self.session.step(dt_s) if self._rom_started() else {}
+            if self.wiggle is not None:
+                if self.wiggle.step():
+                    self.wiggle = None
+                    self._say("What happened? Pick one below.")
+                    self._refresh_identify()
+            elif not self._rom_started():
+                self.controller.heartbeat()
         except Exception as error:  # noqa: BLE001
-            self._fault_or_say(error)
+            if self.wiggle is not None:
+                self._probe_error(error)
+            else:
+                self._fault_or_say(error)
             return
         for channel in moved:
             self._refresh_row(channel)
@@ -571,7 +1031,7 @@ class RomApp:
     def request_close(self) -> None:
         """Exit button, window close and Ctrl+Q: confirm while armed, then close."""
         if self.armed:
-            moving = bool(self.session.moving())
+            moving = self.wiggle is not None or (self._rom_started() and bool(self.session.moving()))
             question = ("A servo is still moving. " if moving else "Servos are powered. ") + \
                 "Disarm (release every output) and quit?"
             if not messagebox.askyesno("Quit robo-prober", question, parent=self.root):
@@ -586,6 +1046,8 @@ class RomApp:
         try:
             if self.session is not None and self.armed:
                 self.session.close()
+            if self.watch_var.get() and self.controller is not None:
+                self.controller.watch(False)
         except Exception:  # noqa: BLE001 - closing anyway; the firmware watchdog releases too
             pass
         self._persist_positions()

@@ -33,8 +33,10 @@ happen.
 - **Identification needs consent.** `identify` resets the chip (via `esptool`),
   so it only runs when you pass `--consent-controller-identification YES_RESET_ALLOWED`.
 - **A pinout is not a permission.** The board catalog describes pins, and every
-  pin record denies probing, reading, writing and PWM. There is no generic GPIO
-  probing at all.
+  pin record denies probing, reading, writing and PWM. The firmware only *reads*
+  pins until you arm; then it drives one pin at a time, when you press Wiggle or
+  Blink, never a pin the catalog reserves (flash, USB, the host serial link) and
+  never a pin the survey finds driven by something else.
 - **Arming is manual.** Nothing moves until you arm with a session token and
   confirm that a physical power cutoff is within reach.
 - **The firmware enforces limits too.** Outputs are off at boot. Each channel
@@ -100,15 +102,19 @@ robo-prober rom-gui --emulator --map demo-map.json --operator you
 
 ### 3. Flash the firmware to an ESP32
 
-`firmware/esp32_robo_prober/` is a PlatformIO (and Arduino IDE) project for
-classic ESP32 and ESP32-S3 dev boards driving a PCA9685 servo board over I2C.
-Its [README](firmware/esp32_robo_prober/README.md) covers wiring and options.
+`firmware/esp32_robo_prober/` is a PlatformIO (and Arduino IDE) project for the
+ESP32 family (ESP32, -S2, -S3, -C3, -C6). Servos can be on a PCA9685 board (found
+at boot on whatever pins it's wired to) or straight on GPIO pins. Its
+[README](firmware/esp32_robo_prober/README.md) covers wiring and options.
 
 ```bash
 pip install platformio
 cd firmware/esp32_robo_prober
-pio run -e esp32dev -t upload --upload-port /dev/ttyUSB0    # Windows: COM3, macOS: /dev/cu.usbserial-...
+pio run -e esp32-s3-devkitc-1 -t upload --upload-port /dev/ttyACM0   # Windows: COM3, macOS: /dev/cu.usbserial-...
 ```
+
+Environments: `esp32dev`, `esp32-s2-saola-1`, `esp32-s3-devkitc-1`,
+`esp32-c3-devkitm-1`, `esp32-c6-devkitc-1`.
 
 ### 4. Discover, identify, choose the board
 
@@ -154,6 +160,33 @@ robo-prober rom-gui --port /dev/ttyUSB0 --map my-robot.map.json --operator you
 ```
 
 See [Range of motion](#range-of-motion) below.
+
+## Find servos
+
+`python robo_prober.py` opens the window on step 1. You don't need to know the
+wiring.
+
+1. **Discover** (nothing moves). The firmware reports its board profile and
+   classifies every usable pin by reading it with the internal pull-up, then the
+   pull-down: *floating* (nothing, or a servo or LED input), *pulled up/down* (a
+   resistor: a button, an I2C line, an LED; proven with the ADC), or *driven* by
+   something else (never driven by robo-prober). It shows the PCA9685 it found at
+   boot ("PCA9685 at 0x40 on SDA 1 / SCL 2") and the I2C devices on pairs of
+   pulled-up pins. Tick **Watch buttons** and press each button: the pins that
+   change are listed.
+2. **Identify** (after Connect & arm). One pin (or PCA9685 channel) at a time:
+   "GPIO 4: it will go to 1500 µs, then wiggle ±60 µs slowly. Make sure it's
+   clear." Press **Wiggle as servo** or **Blink** (LEDs, buzzers), then say what
+   happened (**Servo moved**, **Light / sound**, **Nothing**, **Try again**) and
+   name it ("shoulder"). Floating pins come first, then pulled ones, then PCA9685
+   channels, then boot-strapping pins (after a confirmation). Every GPIO is
+   released after its probe. **Save hardware map**, then **Go to range of
+   motion**.
+3. **Range of motion** shows only the named servos, labelled with their names,
+   each starting where its wiggle left it.
+
+A servo straight on GPIO N is channel `100+N` everywhere (map, API, protocol).
+E-STOP and Esc work throughout.
 
 ## Range of motion
 
@@ -280,10 +313,11 @@ writing. `validate-map` checks the schema, the joint/channel uniqueness, any
 | Layer | Supported |
 | --- | --- |
 | Operating systems | Linux (any distribution), Windows 10/11, macOS. CI runs the tests on all three with Python 3.11 and 3.12. |
-| Controller | Anything that speaks `ROBOPROBE/1` over serial. Reference firmware: ESP32 (`esp32dev`) and ESP32-S3 (`esp32-s3-devkitc-1`). |
-| Servo driver | PCA9685-style 16-channel servo boards (`route: "pca9685_servo"`, channels 0–15, 500–2500 µs). |
+| Controller | Anything that speaks `ROBOPROBE/1` over serial. Reference firmware: ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6 (all build). |
+| Servo outputs | PCA9685-style 16-channel servo boards (channels 0–15) and servos straight on GPIO pins (channel 100+N, LEDC PWM), 500–2500 µs. |
+| Verified on hardware | Not yet for the v0.3 discovery firmware: the survey, watch, I2C scan, GPIO servo and blink paths are tested against the compiled firmware core in a native simulator and the Python model only. |
 | Chip identification | ESP32, ESP32-S2, ESP32-S3, ESP32-C3, ESP32-C6 (via `esptool`). |
-| Board catalog | ESP32 SoC references, ESP32-DevKitC V4, ESP32-S3-DevKitC-1, Raspberry Pi Pico / Pico W, Arduino Uno R3. |
+| Board catalog | ESP32 SoC references, ESP32-DevKitC V4, ESP32-S3-DevKitC-1, Raspberry Pi Pico / Pico W, Arduino Uno R3. The firmware's pin tables are generated from it (`python -m robo_prober.firmware_pins`). |
 | USB bridges recognized | CP210x, CH340, CH343, FT232, Espressif native USB, Arduino Uno, Pico. |
 | Cameras (optional) | ArUco markers via OpenCV. Linux lists V4L2 cameras without opening them; on Windows and macOS you pass a camera index. |
 
@@ -305,14 +339,24 @@ command. v0.2 adds commands and fields; everything from v0.1 keeps its meaning.
 
 ```text
 HELLO                                       -> RP1 OK proto=ROBOPROBE/1 mode=<disarmed|armed|estop> id=<id>
-                                               [fw=<ver> outputs=<pca9685|none> watchdog_ms=<n>
-                                                caps=limit,status,hb,token,estop,start fault=<none|watchdog|stop|estop|driver>]
+                                               [fw=<ver> outputs=<...> i2c=<sda>,<scl>|none pca9685=<0x40,...|none>
+                                                watchdog_ms=<n> caps=limit,status,hb,token,estop,start,survey,watch,i2c,probe,blink
+                                                fault=<none|watchdog|stop|estop|driver>]
+BOARD                                       -> RP1 OK board=<catalog profile id> chip=<model> pins=<usable pins>
+SURVEY pin=<n>                              -> RP1 OK pin=<n> class=<floating|pulled_up|pulled_down|driven_high|driven_low|reserved> adc=<mV|->
+WATCH state=<on|off>                        -> RP1 OK watch=<1|0>
+EVENTS                                      -> RP1 OK events=<pin:level,...|none>
+I2C_SCAN sda=<p> scl=<p>                    -> RP1 OK devices=<0x40,...|none> pca9685=<0x40,...|none>
+PROBE pin=<n> mode=servo start_us=<us> token=<token>
+                                            -> RP1 OK pin=<n> channel=<100+n>
+BLINK pin=<n> count=<1-10> token=<token>    -> RP1 OK pin=<n> blinked=<count>
+RELEASE pin=<n> token=<token>               -> RP1 OK pin=<n> released=1
 ARM token=<token> cutoff=confirmed          -> RP1 OK armed=1
 START channel=<c> pulse_us=<us> token=<token>
                                             -> RP1 OK channel=<c> started_us=<us>
 LIMIT channel=<c> min_us=<a> neutral_us=<n> max_us=<b> [slew_us_s=<r>]
                                             -> RP1 OK channel=<c> min_us=<a> neutral_us=<n> max_us=<b> slew_us_s=<r>
-MOVE channel=<0-15> target_us=<us> seq=<n> [token=<token>]
+MOVE channel=<0-15|100+n> target_us=<us> seq=<n> [token=<token>]
                                             -> RP1 OK seq=<n> channel=<c> target_us=<us>
 HB token=<token>                            -> RP1 OK hb=1
 STATUS channel=<c>                          -> RP1 OK channel=<c> active=<0|1> current_us=<us> target_us=<us>
@@ -352,6 +396,18 @@ ESTOP_CLEAR cutoff=confirmed                -> RP1 OK estop=0
   still works as before; `rom-gui` refuses to arm.
 - `STATUS current_us` is the pulse being output after slew limiting, not a
   measured servo position. Hobby servos report nothing back.
+- v0.3 discovery: `SURVEY`, `WATCH`/`EVENTS` and `I2C_SCAN` only read (the scan
+  clocks the two pins open-drain at the weakest drive strength). `SURVEY` calls a
+  pin *pulled* only when the ADC shows the opposing internal pull moving it by
+  150 mV or more (a resistor); a pin that holds its level without that proof is
+  *driven*, and `PROBE`/`BLINK` refuse it (`pin_driven`). They also refuse pins
+  the board profile reserves or that are input-only (`pin_reserved`), pins the
+  firmware uses or already drives (`pin_claimed`), and run out at the chip's LEDC
+  channels (`no_pwm_slot`); they need `ARM` (`not_armed`). `PROBE` attaches 50 Hz
+  servo PWM at the given start pulse inside the channel's band (`LIMIT channel=100+n`
+  first to set it); the channel then takes `LIMIT`, `MOVE` and `STATUS`. `BLINK`
+  replies at once and pulses at 2 Hz, then releases the pin. Driven GPIOs use the
+  weakest drive strength. WATCH switches itself off after 5 s without `EVENTS`.
 
 ## Camera observations (optional)
 

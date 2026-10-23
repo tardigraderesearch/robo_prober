@@ -99,7 +99,7 @@ BOARD_PROFILES['esp32_chip_reference'] = _esp_profile(
     note='SoC inventory; never assume these are exposed on a particular ESP32 board.')
 BOARD_PROFILES['esp32_s2_chip_reference'] = _esp_profile(
     'ESP32-S2 SoC GPIO reference', 'ESP32-S2', _ESP_S2,
-    strap=(0,45,46), bus=range(26,33), jtag=(39,40,41,42),
+    strap=(0,45,46), bus=range(26,33), usb=(19,20), uart=(43,44), jtag=(39,40,41,42),
     input_only=(46,), adc1={n:n-1 for n in range(1,11)},
     adc2={n:n-11 for n in range(11,21)}, source_key='esp32s2')
 BOARD_PROFILES['esp32_s3_chip_reference'] = _esp_profile(
@@ -260,6 +260,51 @@ def candidate_gpio(board_id):
     profile=get_profile(board_id)
     return {n:p for n,p in profile['pins'].items()
             if p['exposed'] is True and p['type']=='gpio' and not p['reserved']}
+
+
+# Raspberry Pi / Jetson header profiles live in catalog_sbc.py when present.
+try:
+    from . import catalog_sbc as _sbc
+except ImportError:
+    _sbc = None
+_SBC_PROFILES = getattr(_sbc, 'SBC_PROFILES', None) or getattr(_sbc, 'BOARD_PROFILES', None) or {}
+for _board_id, _sbc_profile in _SBC_PROFILES.items():
+    BOARD_PROFILES.setdefault(_board_id, _sbc_profile)
+
+
+# Discovery flags for the firmware pin tables (`python -m robo_prober.firmware_pins`
+# turns these into firmware/esp32_robo_prober/src/pin_profiles.h). They describe what
+# a pin IS, never a permission: the firmware still only reads pins until ARM,
+# and drives one pin at a time on the operator's request.
+PIN_USABLE = 1      # on the chip and not wired to flash/PSRAM, USB or the host UART
+PIN_LAST = 2        # boot strapping or JTAG: surveyed last, driven only after a confirmation
+PIN_INPUT_ONLY = 4  # can be read, never driven
+PIN_ADC = 8         # has an ADC channel
+_NEVER_TOUCH = ('flash / PSRAM interface', 'USB Serial/JTAG', 'default UART')
+
+FIRMWARE_CHIPS = {  # firmware build target -> chip reference profile (BOARD reports the profile id)
+    'esp32': 'esp32_chip_reference',
+    'esp32s2': 'esp32_s2_chip_reference',
+    'esp32s3': 'esp32_s3_chip_reference',
+    'esp32c3': 'esp32_c3_chip_reference',
+    'esp32c6': 'esp32_c6_chip_reference',
+}
+
+
+def discovery_pin_flags(board_id):
+    """{gpio: PIN_* bits} for every GPIO of a chip reference profile (0 = never touch)."""
+    flags={}
+    for n,p in BOARD_PROFILES[board_id]['pins'].items():
+        functions=set(p['alternate_functions'])
+        if functions & set(_NEVER_TOUCH):
+            flags[n]=0
+            continue
+        bits=PIN_USABLE
+        if functions & {'boot strapping', 'JTAG'}: bits|=PIN_LAST
+        if 'INPUT ONLY' in functions: bits|=PIN_INPUT_ONLY
+        if p['adc']: bits|=PIN_ADC
+        flags[n]=bits
+    return flags
 
 
 def assert_no_automatic_probe():

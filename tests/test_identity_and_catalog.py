@@ -18,3 +18,12 @@ def test_matching_boards_are_exact_board_profiles_only():
     matches = matching_boards_for_chip("ESP32-S3")
     assert "esp32_s3_devkitc_1" in matches
     assert "esp32_s3_chip_reference" not in matches
+
+
+def test_firmware_pin_tables_are_generated_from_the_catalog():
+    from robo_prober.firmware_pins import HEADER, chip_flags, render_header
+    assert HEADER.read_text(encoding="utf-8") == render_header(), "run: python -m robo_prober.firmware_pins"
+    s3 = chip_flags("esp32s3")
+    assert s3[19] == s3[20] == s3[43] == s3[44] == 0          # USB and the host UART: never touched
+    assert all(s3[pin] == 0 for pin in range(26, 38))          # flash / PSRAM
+    assert s3[0] & 2 and s3[46] & 4 and s3[1] & 8              # strapping, input only, ADC

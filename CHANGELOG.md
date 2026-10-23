@@ -6,7 +6,37 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+### Added
+- Find servos without knowing the wiring. The window opens on **1. Discover**
+  (read-only pin survey, the PCA9685 found at boot, I2C devices, a button
+  watch), then **2. Identify** (one pin or PCA9685 channel at a time: wiggle as
+  a servo or blink, say what happened, name it, save the hardware map), then
+  **3. Range of motion** with only the named servos. The ROM step says "Find
+  servos first, or open a saved map" instead of showing 16 empty rows.
+- Firmware 0.3.0 (ROBOPROBE/1 additions): `BOARD`, `SURVEY`, `WATCH`/`EVENTS`,
+  `I2C_SCAN`, `PROBE` (servo PWM straight on a GPIO, channel 100+N), `BLINK`,
+  `RELEASE`, with the new refusals `pin_reserved`, `pin_driven`, `pin_claimed`,
+  `no_pwm_slot`, `not_armed`, `bad_pin`. A pin held by something else is never
+  driven; a pin counts as resistively pulled only with ADC proof.
+- The firmware finds its PCA9685 at boot: it scans pairs of pulled-up pins, both
+  orders, addresses 0x08-0x77, identifies a PCA9685 by its registers and switches
+  it fully off. HELLO reports `i2c=<sda>,<scl>` and `pca9685=<addresses>`.
+- Firmware for ESP32, ESP32-S2, ESP32-S3, ESP32-C3 and ESP32-C6, with per-chip
+  pin tables generated from the board catalog (`python -m robo_prober.firmware_pins`;
+  a test checks they match).
+- Hardware maps may list non-servo parts under `devices` (led, button, i2c, ...).
+
+### Changed
+- PlatformIO uses the pioarduino platform (Arduino core 3.x, pinned) for every
+  environment, since ESP32-C6 needs it. `RP_PCA9685_ADDR` is gone (the first
+  PCA9685 found is used; all are reported).
+- Without a PCA9685, `ARM` now succeeds (GPIO servos work); `START` on channels
+  0-15 is refused with `driver_unavailable`.
+
 ### Fixed
+- `ARM` failed with `driver_unavailable` when the PCA9685 was not on the board's
+  default I2C pins.
+- The catalog's ESP32-S2 profile now reserves its USB (19/20) and UART0 (43/44) pins.
 - One entry point: `python robo_prober.py` on every OS. It asks (Y/n) before
   installing its libraries into a private `.venv`, or says it's good to go and starts.
   `run.sh`, `run.bat`, `run.command` and `launcher.py` are gone.
