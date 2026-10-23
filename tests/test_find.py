@@ -38,7 +38,8 @@ def test_discover_classifies_pins_without_driving_anything(setup):
     assert pins == sorted(pins) and "GPIO 4" in keys and keys[-1].startswith("PCA9685 ch")  # pin-number order
     assert "GPIO 7" not in keys                              # driven: never a target
     assert keys.index("GPIO 5") < keys.index("GPIO 21")      # pin order, whatever the class
-    assert [t for t in targets(survey) if t.key == "GPIO 0"][0].last         # strapping pins still need a confirmation
+    assert "GPIO 0" not in keys and "GPIO 45" not in keys      # boot pins left out by default
+    assert [t for t in targets(survey, include_boot_pins=True) if t.key == "GPIO 0"][0].last  # opt-in: still confirmed
 
 
 def test_cascade_finds_servo_led_button_and_never_drives_a_driven_pin(setup):

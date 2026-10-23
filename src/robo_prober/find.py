@@ -154,11 +154,12 @@ def discover(ctl, *, scan_i2c: bool = True) -> Survey:
     return survey
 
 
-def targets(survey: Survey) -> list[Target]:
-    """What to identify: every drivable GPIO in pin-number order (boot-strapping /
-    JTAG pins still ask for a confirmation when reached), then PCA9685 channels.
-    Driven, reserved and input-only pins are never targets."""
-    usable = sorted((info for info in survey.pins if info.drivable), key=lambda info: info.pin)
+def targets(survey: Survey, include_boot_pins: bool = False) -> list[Target]:
+    """What to identify: every drivable GPIO in pin-number order, then PCA9685 channels.
+    Boot-strapping / JTAG pins are left out unless asked for (then they still ask for
+    a confirmation). Driven, reserved and input-only pins are never targets."""
+    usable = sorted((info for info in survey.pins if info.drivable and (include_boot_pins or not info.last)),
+                    key=lambda info: info.pin)
     pins = [Target(info.pin, cls=info.cls, last=info.last) for info in usable]
     pca = [Target(pca_channel=ch, cls="pca9685") for ch in range(16)] if survey.pca_addresses else []
     return pins + pca

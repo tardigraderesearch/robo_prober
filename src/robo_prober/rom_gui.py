@@ -310,6 +310,9 @@ class RomApp:
         for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn, self.zero_btn):
             widget.configure(takefocus=False)  # Space must mean "buzz", never "press the focused button"
             widget.pack(side="left", padx=(0, 6))
+        self.boot_pins_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(actions, text="Include boot pins", variable=self.boot_pins_var,
+                        command=self._refresh_identify).pack(side="left", padx=(12, 0))
         self.auto_next_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(actions, text="Buzz the next pin automatically", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
         ttk.Label(actions, text="Keys: Space buzz · Y servo · O one way only · L light · N no · S skip · B back",
@@ -999,7 +1002,7 @@ class RomApp:
         buttons = [find.Target(pin, cls="button") for pin in sorted(self.pressed)]
         if self.survey is None:
             return buttons
-        return buttons + [t for t in find.targets(self.survey) if t.pin not in self.pressed]
+        return buttons + [t for t in find.targets(self.survey, self.boot_pins_var.get()) if t.pin not in self.pressed]
 
     def current_target(self) -> find.Target | None:
         targets = self._identify_targets()
