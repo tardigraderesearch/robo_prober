@@ -111,6 +111,7 @@ class RomApp:
         self.wiggle: find.Wiggle | None = None
         self.last_action = ""
         self.pending_kind = ""
+        self._faulty_disarmed = ""
         self._watch_ticks = 0
         self._found_path: Path | None = None
         self.wiggle_slew_us_s = find.DEFAULT_WIGGLE_SLEW_US_S
@@ -1187,8 +1188,10 @@ class RomApp:
             self._release_faulty(target, name)
         self._next_target()
         if kind == "faulty":
+            disarmed, self._faulty_disarmed = self._faulty_disarmed, ""
             self._say(f"{name} ({target.key}) saved as FAULTY: {note}. The bench and range of motion skip it. "
-                      + (f"Next: {self.current_target().key}." if self.current_target() else "All pins done."))
+                      + (disarmed or (f"Next: {self.current_target().key}." if self.current_target()
+                                      else "All pins done.")), error=bool(disarmed))
 
     # -- servo type (servo_db)
     @staticmethod
@@ -1295,10 +1298,11 @@ class RomApp:
             except Exception as error:  # noqa: BLE001
                 self._probe_error(error)
             return
-        text = (f"{name} ({target.key}) is still being driven: PCA9685 channels are held until Disarm, and a servo "
-                "with broken feedback can keep pushing. Disarm now (releases every output)?")
-        if self.ask_fn("Faulty servo still held", text, ["Disarm now", "Keep holding"]) == "Disarm now":
-            self.disarm()
+        # PCA9685 channels are held until DISARM and one with broken feedback keeps pushing:
+        # fail safe, no question in the main flow.
+        self.disarm()
+        self._faulty_disarmed = f"{name} was still driven (a PCA9685 channel is held until Disarm), so everything " \
+                                "was disarmed. Connect & arm to continue."
 
     def skip_target(self) -> None:
         target = self.current_target()

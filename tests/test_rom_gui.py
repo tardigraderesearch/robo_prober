@@ -615,10 +615,11 @@ def test_identify_one_way_only_marks_faulty_and_bench_and_rom_skip_it(tmp_path):
         assert app.name_row.winfo_manager() == "grid"
         app.name_var.set("pitch2")
         asked = []
-        app.ask_fn = lambda title, text, options: asked.append(text) or "Disarm now"
+        app.ask_fn = lambda title, text, options: asked.append(text) or "Cancel"
         app.save_name()
-        assert "broken feedback can keep pushing" in asked[0]
-        assert not app.armed and device.output(2) is None                  # let go of it
+        assert asked == []                                                  # no dialog in the main flow
+        assert not app.armed and device.output(2) is None                  # fail safe: let go of it
+        assert "FAULTY" in app.status.get() and "everything was disarmed" in app.status.get()
         found = app.found["PCA9685 ch 2"]
         assert found.kind == "faulty" and "one way only" in found.note
         row = next(r for r in app.found_table.get_children()
