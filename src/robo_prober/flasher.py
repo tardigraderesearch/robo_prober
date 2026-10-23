@@ -114,17 +114,52 @@ def classify_hello(info: dict[str, str] | None, manifest: dict[str, Any] | None 
     return FirmwareStatus("outdated", f"This board runs older robo-prober firmware ({why}).", dict(info), missing)
 
 
+BOOT_WAIT_S = 8.0  # opening the port resets most ESP32 boards; boot + pin survey takes a few seconds
+
+
 def _serial_hello(port: str, timeout_s: float) -> dict[str, str]:
-    from .transport import SerialProtocolTransport
+    """Open the port ONCE and keep saying HELLO until the board has booted.
 
-    with SerialProtocolTransport(port, timeout_s=timeout_s) as transport:
-        ser = transport.connection or transport._serial
-        with contextlib.suppress(Exception):
-            ser.reset_input_buffer()
-        return transport.hello()
+    Reopening per attempt would reset the board each time, so it would never
+    get far enough to answer.
+    """
+    import serial
+
+    from .transport import parse_response
+
+    deadline = time.monotonic() + max(timeout_s, BOOT_WAIT_S)
+    ser = serial.Serial()
+    ser.port, ser.baudrate, ser.timeout = port, 115200, 0.3
+    ser.dtr = ser.rts = False  # don't hold the board in reset / download mode while we listen
+    reset_at = time.monotonic() + 3.0
+    with ser:
+        buffer = b""
+        while time.monotonic() < deadline:
+            if reset_at and time.monotonic() > reset_at:
+                # Silent for 3 s: probably parked in the bootloader (e.g. after esptool).
+                # Pulse EN through RTS once, the same way esptool's hard reset does.
+                reset_at = 0
+                ser.rts = True
+                time.sleep(0.1)
+                ser.rts = False
+            ser.write(b"HELLO\n")
+            end = time.monotonic() + 0.6
+            while time.monotonic() < end:
+                buffer += ser.read(256)
+                while b"\n" in buffer:
+                    raw, buffer = buffer.split(b"\n", 1)
+                    line = raw.decode("ascii", errors="replace").strip()
+                    if line.startswith("RP1 "):
+                        try:
+                            status, fields = parse_response(line)
+                        except Exception:  # noqa: BLE001 - boot noise
+                            continue
+                        if status == "OK" and "proto" in fields:
+                            return fields
+    raise TimeoutError("no ROBOPROBE answer")
 
 
-def check_firmware(port: str, *, attempts: int = 3, timeout_s: float = 1.0,
+def check_firmware(port: str, *, attempts: int = 1, timeout_s: float = BOOT_WAIT_S,
                    hello_fn: Callable[[str, float], dict[str, str]] = _serial_hello,
                    manifest: dict[str, Any] | None = None) -> FirmwareStatus:
     """Say HELLO (read-only; nothing is armed). Retries cover the boot after a port-open reset."""
@@ -193,6 +228,9 @@ class EsptoolSession:
         self._cmds.reset_chip(self.esp, "hard-reset")
 
     def close(self) -> None:
+        # Always leave the board running its firmware, never parked in the bootloader.
+        with contextlib.suppress(Exception):
+            self.esp.hard_reset()
         with contextlib.suppress(Exception):
             self.esp._port.close()
 
