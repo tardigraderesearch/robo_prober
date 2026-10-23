@@ -308,9 +308,10 @@ class RomApp:
         self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop_identify)
         self.zero_btn = ttk.Button(actions, text="Set all servos to 0", command=self.zero_all_servos)
         for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn, self.zero_btn):
+            widget.configure(takefocus=False)  # Space must mean "buzz", never "press the focused button"
             widget.pack(side="left", padx=(0, 6))
         self.auto_next_var = tk.BooleanVar(value=True)
-        ttk.Checkbutton(actions, text="Buzz the next pin after No", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
+        ttk.Checkbutton(actions, text="Buzz the next pin automatically", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
         ttk.Label(actions, text="Keys: Space buzz · Y servo · O one way only · L light · N no · S skip · B back",
                   style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
@@ -1176,8 +1177,6 @@ class RomApp:
         if kind == "unused":
             self.found[target.key] = find.Found(target, "unused")
             self._next_target()
-            if self.auto_next_var.get():
-                self.root.after(150, self.do_wiggle)  # next pin buzzes right away: just keep pressing N
             return
         self.pending_kind = kind
         self.name_var.set("")
@@ -1330,6 +1329,13 @@ class RomApp:
             self._next_target()
 
     def _next_target(self) -> None:
+        self._advance_target()
+        # Next pin buzzes right away after N, a saved name or Skip: just keep answering.
+        if self.auto_next_var.get() and self.armed and self.current_target() is not None:
+            self.root.after(150, self.do_wiggle)
+        self.root.focus_set()  # keys go to the app, not to a button or the name field
+
+    def _advance_target(self) -> None:
         self.focus_key = None
         self.last_action = ""
         self.pending_kind = ""
@@ -1401,7 +1407,7 @@ class RomApp:
         while target is not None:
             self.skipped.add(target.key)
             target = self.current_target()
-        self._next_target()
+        self._advance_target()
         self._refresh_all()
 
     def _found_map(self) -> dict[str, Any]:
