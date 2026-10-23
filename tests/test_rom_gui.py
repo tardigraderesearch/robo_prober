@@ -223,7 +223,7 @@ def test_find_servos_then_range_of_motion(tmp_path):
 
         path = tmp_path / "found.map.json"
         app.go_to_rom(path)
-        assert not app.armed and device.output(104) is None
+        assert app.armed and device.output(104) is None    # re-armed in one click; nothing outputs until Enable
         saved = load_map(path)
         assert saved["joints"]["shoulder"]["channel"] == 104
         assert saved["devices"]["e_button"]["kind"] == "button"

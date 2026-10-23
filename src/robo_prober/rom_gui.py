@@ -17,6 +17,8 @@ import queue
 import threading
 import tkinter as tk
 from pathlib import Path
+from datetime import datetime
+import re
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
@@ -1070,19 +1072,32 @@ class RomApp:
                   f"to {path}.")
         return path
 
+    def _default_map_path(self) -> Path:
+        """Maps are saved without a dialog: ~/robo_prober_maps/<board>-<date-time>.map.json."""
+        board = re.sub(r"[^A-Za-z0-9_-]+", "_", str((self.survey and getattr(self.survey, "board", None)) or "robot"))
+        folder = Path.home() / "robo_prober_maps"
+        folder.mkdir(parents=True, exist_ok=True)
+        return folder / f"{board}-{datetime.now().strftime('%Y%m%d-%H%M%S')}.map.json"
+
     def go_to_rom(self, path: Path | None = None) -> None:
         """Save the map, release everything and show only the named servos for range of motion."""
         if self.wiggle is not None:
             return
-        target = path or self._found_path
+        target = path or self._found_path or self._default_map_path()
         if self.save_found_map(target) is None:
             return
+        saved = self._found_path
         if self.armed:
             self.disarm()
-        self.load_map_file(self._found_path)
+        self.load_map_file(saved)
         self.steps.select(2)
-        self._say("All outputs released. Connect & arm, then Enable each servo: it starts where the wiggle "
-                  "left it.")
+        if not self.roms:
+            self._say(f"Saved to {saved}. No servos were named, so there is nothing to range.", error=True)
+            return
+        self.connect_and_arm()  # same session, same power-cutoff confirmation
+        if self.armed:
+            self._say(f"Saved to {saved}. Armed: press Enable on a servo (it starts where the buzz left it), "
+                      "then drag its slider.")
 
     def enable(self, channel: int) -> None:
         """First output on a channel, at the start value shown in its row."""
