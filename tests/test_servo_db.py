@@ -129,12 +129,13 @@ def test_get():
 def test_safe_pulse_range():
     assert servo_db.safe_pulse_range(None) == (1000, 2000)
     assert servo_db.safe_pulse_range({"pulse_min_us": None, "pulse_max_us": None}) == (1000, 2000)
-    assert servo_db.safe_pulse_range({"pulse_min_us": 500, "pulse_neutral_us": 1500, "pulse_max_us": 2500}) == (700, 2300)
+    assert servo_db.safe_pulse_range({"pulse_min_us": 500, "pulse_neutral_us": 1500, "pulse_max_us": 2500}) == (1000, 2000)  # never wider than the default
     assert servo_db.safe_pulse_range({"pulse_min_us": 900, "pulse_neutral_us": 1500, "pulse_max_us": 2100}) == (1020, 1980)
-    assert servo_db.safe_pulse_range({"pulse_min_us": 400, "pulse_max_us": 3000}, shrink=0) == (500, 2500)
+    assert servo_db.safe_pulse_range({"pulse_min_us": 400, "pulse_max_us": 3000}, shrink=0) == (1000, 2000)
+    assert servo_db.safe_pulse_range({"pulse_min_us": 1100, "pulse_neutral_us": 1500, "pulse_max_us": 1900}) == (1180, 1820)
     for e in ENTRIES:
         lo, hi = servo_db.safe_pulse_range(e)
-        assert 500 <= lo < hi <= 2500
+        assert 1000 <= lo < hi <= 2000
         if e["pulse_min_us"] is not None and e["pulse_max_us"] is not None:
             assert lo >= e["pulse_min_us"] and hi <= e["pulse_max_us"]
 

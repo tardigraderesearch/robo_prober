@@ -272,7 +272,8 @@ class RomApp:
         self.skip_btn = ttk.Button(actions, text="Skip", command=self.skip_target)
         self.back_btn = ttk.Button(actions, text="Back", command=self.back_target)
         self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop_identify)
-        for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn):
+        self.zero_btn = ttk.Button(actions, text="Set all servos to 0", command=self.zero_all_servos)
+        for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn, self.zero_btn):
             widget.pack(side="left", padx=(0, 6))
         self.auto_next_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(actions, text="Buzz the next pin after No", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
@@ -1043,6 +1044,49 @@ class RomApp:
         self._refresh_identify()
         target = self.current_target()
         self._say(f"Next: {target.key}." if target else "All pins done. Save the hardware map.")
+
+    ZERO_US = 1500
+    ZERO_WARNING = ("Ensure servo horns are mounted at middle range or disconnect them before zeroing; "
+                    "then re-mount servo horns before continuing.")
+
+    def zero_all_servos(self) -> None:
+        """Drive every identified servo to the middle pulse (slider 0) and hold it there."""
+        if not self.armed or self.controller is None:
+            self._say("Connect & arm first.", error=True)
+            return
+        if self.wiggle is not None:
+            self._say("Wait for the buzz to finish.", error=True)
+            return
+        servos = [f for f in self.found.values() if f.kind == "servo"]
+        if not servos:
+            self._say("No servos identified yet: buzz the pins and answer Y first.", error=True)
+            return
+        names = ", ".join(f.name or f.target.key for f in servos)
+        text = f"{self.ZERO_WARNING}\n\nThis moves {names} to {self.ZERO_US} us and holds them there."
+        if self.ask_fn("Set all servos to 0", text, ["Set all servos to 0", "Cancel"]) != "Set all servos to 0":
+            self._say("Nothing moved.")
+            return
+        zero, done = self.ZERO_US, []
+        try:
+            for found in servos:
+                ch = found.target.channel
+                held = self.controller.position(ch)
+                low, high = zero - 50, zero + 50
+                if held is not None:
+                    low, high = min(low, held), max(high, held)
+                self.controller.set_limits(ch, low, high, neutral_us=zero)
+                if held is None:
+                    self.controller.start(ch, zero)
+                else:
+                    self.controller.move(ch, zero)
+                found.start_us = zero
+                done.append(found.name or found.target.key)
+        except Exception as error:  # noqa: BLE001
+            self._probe_error(error)
+            return
+        self._say(f"Holding {', '.join(done)} at {zero} us (0). Re-mount the horns at the middle of each joint's "
+                  "travel, then continue. Disarm or E-STOP releases them.")
+        self._refresh_identify()
 
     def stop_identify(self) -> None:
         """End the walk through the pins. A wiggle in progress is stopped (all outputs released)."""

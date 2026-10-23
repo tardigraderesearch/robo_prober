@@ -117,7 +117,7 @@ def safe_pulse_range(servo: dict[str, Any] | str | None, shrink: float = 0.2) ->
     """Conservative start band (low_us, high_us) for the range-of-motion step.
 
     The datasheet range is pulled toward neutral by ``shrink`` of each half-span
-    and clamped to the ROM hard limits. Unknown range (or a bus servo) gives
+    and never wider than 1000-2000 us. Unknown range (or a bus servo) gives
     1000-2000 us.
     """
     if isinstance(servo, str):
@@ -131,7 +131,8 @@ def safe_pulse_range(servo: dict[str, Any] | str | None, shrink: float = 0.2) ->
         mid = (lo + hi) // 2
     low = round(mid - (mid - lo) * (1 - shrink))
     high = round(mid + (hi - mid) * (1 - shrink))
-    return max(ABS_MIN_US, low), min(ABS_MAX_US, high)
+    # A safe *start* is never wider than the default: datasheet maxima are travel limits, not a safe opening band.
+    return max(DEFAULT_BAND_US[0], low), min(DEFAULT_BAND_US[1], high)
 
 
 # ---------------------------------------------------------------- DTG bridge

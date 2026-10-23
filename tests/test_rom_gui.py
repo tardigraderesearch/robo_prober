@@ -397,3 +397,26 @@ def test_estop_latched_before_window_opened_can_be_cleared():
         assert app.armed
     finally:
         app.close()
+
+
+def test_set_all_servos_to_zero_warns_then_holds_at_1500():
+    from robo_prober import find
+    from robo_prober.rom_gui import RomApp
+
+    root = _fw_root()
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    try:
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        app.discover()
+        t = [x for x in app._identify_targets() if x.pin == 4][0]
+        app.found[t.key] = find.Found(t, "servo", "shoulder", None)
+        asked = []
+        app.ask_fn = lambda title, text, options: asked.append(text) or "Cancel"
+        app.zero_all_servos()
+        assert "re-mount servo horns" in asked[0] and app.controller.position(104) is None   # cancel: nothing moved
+        app.ask_fn = lambda title, text, options: options[0]
+        app.zero_all_servos()
+        assert app.controller.position(104) == 1500 and app.found[t.key].start_us == 1500
+    finally:
+        app.close()
