@@ -371,3 +371,20 @@ def test_legacy_model_matches_v01_reference_firmware():
     assert device.handle("ARM token=x cutoff=confirmed", 0) == "RP1 OK armed=1"
     assert device.handle("MOVE channel=0 target_us=1500 seq=1 token=x", 0) == "RP1 OK seq=1 channel=0 target_us=1500"
     assert device.handle("LIMIT channel=0 min_us=1 neutral_us=2 max_us=3", 0) == "RP1 ERR reason=unknown_command"
+
+
+def test_cached_i2c_pins_are_verified_first_then_the_scan_runs(sim_binary):
+    """src/main.cpp remembers the PCA9685 pins in NVS; the next boot checks only that pair
+    (if the survey still sees pull-ups there), else falls back to the full scan."""
+    replies = run_sim(sim_binary, ["@BOOT_CACHED 8 9", "@BOOT_CACHED 9 8", "@BOOT_CACHED 6 8",
+                                   "@BOOT_CACHED 7 9", "@BOOT_CACHED 99 9", "@BOOT_CACHED -1 -1"])
+    fields = [dict(part.split("=", 1) for part in reply.split()[1:]) for reply in replies]
+    assert fields[0] == {"cached": "1", "i2c": "8,9", "pca": "0x40", "begins": "2", "touched": "8,9"}
+    # wrong order, or a button's pull-up: not a PCA9685 there -> the scan finds it anyway
+    for item in fields[1:3]:
+        assert item["cached"] == "0" and item["i2c"] == "8,9" and item["pca"] == "0x40"
+        assert int(item["begins"]) > 2
+    # a pin something drives low (GPIO 7) or an impossible pin is never probed from the cache
+    for item in fields[3:]:
+        assert item["cached"] == "0" and item["i2c"] == "8,9" and "7" not in item["touched"].split(",")
+    assert fields[5]["touched"] == fields[4]["touched"]   # same as a plain scan

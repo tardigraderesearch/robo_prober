@@ -312,13 +312,13 @@ def test_current_firmware_skips_install(tmp_path):
 
 
 def test_older_robo_prober_firmware_offers_install_not_error(tmp_path):
-    """HELLO looked fine, but Discover hits a missing cap: offer the same backup-and-install."""
+    from robo_prober.reference_device import FIRMWARE_VERSION, ReferenceDevice
     from robo_prober import flasher
     from robo_prober.reference_device import ReferenceDevice
 
     class OldFirmware(ReferenceDevice):
         def _cmd_hello(self, fields, now_ms):
-            return super()._cmd_hello(fields, now_ms).replace("fw=0.3.0", "fw=0.2.0").split(" caps=")[0] + \
+            return super()._cmd_hello(fields, now_ms).replace(f"fw={FIRMWARE_VERSION}", "fw=0.2.0").split(" caps=")[0] + \
                 " caps=limit,status,hb,token,estop,start fault=none"
 
     app, calls = _fw_app(tmp_path, status=flasher.FirmwareStatus("current", "ok"))

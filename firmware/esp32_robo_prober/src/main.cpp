@@ -1,4 +1,5 @@
 #include <Arduino.h>
+#include <Preferences.h>
 #include <Wire.h>
 #include <driver/gpio.h>
 #include <esp_log.h>
@@ -15,7 +16,8 @@
 //
 // Build-time options (PlatformIO build_flags, or #define at the top of this file):
 //   RP_OUTPUTS_NONE          protocol-only build, drives nothing
-//   RP_I2C_SDA, RP_I2C_SCL   PCA9685 I2C pins (default: found at boot, see Core::findI2c)
+//   RP_I2C_SDA, RP_I2C_SCL   PCA9685 I2C pins (default: found at boot, see Core::findI2c;
+//                            the pins found are cached in NVS and checked first next boot)
 //   RP_PCA9685_OE_PIN        GPIO wired to the PCA9685 OE pin, -1 = not wired
 //   RP_PCA9685_OSC_HZ        oscillator calibration (default 25 MHz)
 //   RP_ESTOP_PIN             GPIO for a normally-closed e-stop switch to GND,
@@ -222,6 +224,30 @@ rp::Core core(outputs, board, "esp32-robo-prober", "gpio+pca9685", RP_WATCHDOG_M
 rp::LineBuffer line_buffer;
 char reply[rp::kReplyMax];
 
+// The PCA9685 pins found at boot are remembered in NVS (Preferences) so the
+// next boot checks that one pair first instead of scanning every pulled-up pair.
+// The cache is only a hint: Core::verifyI2c re-checks it against this boot's
+// survey and a real PCA9685 reply, and anything else falls back to the scan.
+#if !defined(RP_OUTPUTS_NONE) && !(defined(RP_I2C_SDA) && defined(RP_I2C_SCL))
+constexpr const char *kNvsNamespace = "robo_prober";
+
+void findPca() {
+  Preferences prefs;
+  bool nvs = prefs.begin(kNvsNamespace, false);
+  int sda = nvs ? prefs.getInt("i2c_sda", -1) : -1;
+  int scl = nvs ? prefs.getInt("i2c_scl", -1) : -1;
+  bool same_board = nvs && prefs.getString("profile", "") == RP_TABLE(_profile);
+  bool cached = same_board && core.verifyI2c(i2c, sda, scl);
+  if (!cached) core.findI2c(i2c);
+  if (nvs && core.pcaAddress() && !cached) {
+    prefs.putInt("i2c_sda", core.i2cSda());
+    prefs.putInt("i2c_scl", core.i2cScl());
+    prefs.putString("profile", RP_TABLE(_profile));
+  }
+  if (nvs) prefs.end();
+}
+#endif
+
 bool estopInputTripped() {
 #if RP_ESTOP_PIN >= 0
   return digitalRead(RP_ESTOP_PIN) == HIGH;
@@ -248,7 +274,7 @@ void setup() {
 #if defined(RP_I2C_SDA) && defined(RP_I2C_SCL)
   core.findI2c(i2c, RP_I2C_SDA, RP_I2C_SCL, true);
 #else
-  core.findI2c(i2c);
+  findPca();
 #endif
   // No PCA9685: START on channels 0-15 is refused (driver_unavailable); GPIO servos still work.
   if (core.pcaAddress()) outputs.pca_ok = outputs.pca.begin(core.pcaAddress());

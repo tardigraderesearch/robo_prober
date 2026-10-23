@@ -17,7 +17,7 @@ mechanism can safely reach even the default band.
 
 | Rule | What the firmware does |
 | --- | --- |
-| Boot | All GPIOs inputs; OE pin (if wired) held high before anything else runs. Every pin the profile allows is surveyed read-only (pull-up, pull-down, ADC). Pairs of pulled-up pins are scanned for I2C devices at the weakest drive strength; every PCA9685 found is switched fully off and the first one becomes channels 0-15. |
+| Boot | All GPIOs inputs; OE pin (if wired) held high before anything else runs. Every pin the profile allows is surveyed read-only (pull-up, pull-down, ADC). Pairs of pulled-up pins are scanned for I2C devices at the weakest drive strength; every PCA9685 found is switched fully off and the first one becomes channels 0-15. The pins it was found on are remembered in NVS (`Preferences`, namespace `robo_prober`, with the board profile); the next boot checks that one pair first, only if this boot's survey still sees pull-ups there, and falls back to the full scan otherwise. |
 | Survey | `SURVEY`, `WATCH`/`EVENTS`, `I2C_SCAN` and `BOARD` only read. A pin that holds its level against the internal pulls is *driven* unless the ADC proves a resistor (the opposing pull moves it 150 mV or more). |
 | GPIO probes | `PROBE` (servo PWM at an explicit start pulse, channel 100+N) and `BLINK` (2 Hz on/off, then released) need ARM, drive one pin, at the weakest drive strength, and refuse pins the profile reserves, input-only pins, pins the firmware uses, and any pin a fresh survey finds driven. `RELEASE` returns a pin to input. |
 | Arming | `MOVE` is refused until `ARM token=<t> cutoff=confirmed`. The token is a session token; every `MOVE` and `HB` must carry it. Without a PCA9685, `START` on channels 0-15 is refused (`driver_unavailable`). |
@@ -41,7 +41,7 @@ pins. Options, as `build_flags` in `platformio.ini`:
 
 | Flag | Default | Meaning |
 | --- | --- | --- |
-| `RP_I2C_SDA`, `RP_I2C_SCL` | found at boot | scan only this PCA9685 pin pair |
+| `RP_I2C_SDA`, `RP_I2C_SCL` | found at boot (cached in NVS) | scan only this PCA9685 pin pair (no NVS cache) |
 | `RP_PCA9685_OE_PIN` | `-1` | GPIO wired to OE (active low), `-1` = not wired |
 | `RP_PCA9685_OSC_HZ` | `25000000` | oscillator calibration |
 | `RP_ESTOP_PIN` | `-1` | normally-closed e-stop to GND; pin high latches ESTOP |

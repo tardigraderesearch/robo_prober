@@ -15,6 +15,9 @@
 //   @DRIVER fail|ok     make the next driver calls fail or succeed -> SIM driver=<fail|ok>
 //   @ESTOP_PIN          trip the hardware e-stop input             -> SIM estop_pin=1
 //   @RAW <bytes>        feed <bytes> plus '\n' through LineBuffer  -> reply or SIM pending
+//   @BOOT_CACHED <sda> <scl>  a fresh boot with these PCA9685 pins remembered in NVS, as
+//                       src/main.cpp does it: Core::verifyI2c, else the full scan
+//                       -> SIM cached=<0|1> i2c=<sda>,<scl> pca=<addr> begins=<n> touched=<pins>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -119,6 +122,22 @@ int main() {
     } else if (line == "@ESTOP_PIN") {
       core.externalEstop();
       std::printf("SIM estop_pin=1\n");
+    } else if (line.rfind("@BOOT_CACHED ", 0) == 0) {
+      int sda = -1, scl = -1;
+      std::sscanf(line.c_str() + 13, "%d %d", &sda, &scl);
+      sim::FakeI2c fresh_bus;
+      rp::Core fresh(driver, board, "reference-emulator", "emulated", rp::kDefaultWatchdogMs);
+      fresh.begin(now);
+      bool cached = fresh.verifyI2c(fresh_bus, sda, scl);
+      if (!cached) fresh.findI2c(fresh_bus);
+      std::string touched;
+      for (int g = 0; g < rp::kGpioCount; ++g) {
+        if (!fresh_bus.touched[g]) continue;
+        if (!touched.empty()) touched += ",";
+        touched += std::to_string(g);
+      }
+      std::printf("SIM cached=%d i2c=%d,%d pca=0x%02x begins=%d touched=%s\n", cached ? 1 : 0, fresh.i2cSda(),
+                  fresh.i2cScl(), fresh.pcaAddress(), fresh_bus.begins, touched.empty() ? "none" : touched.c_str());
     } else if (line.rfind("@RAW ", 0) == 0) {
       std::string raw = line.substr(5);
       // Escapes so tests can inject control bytes: \xHH

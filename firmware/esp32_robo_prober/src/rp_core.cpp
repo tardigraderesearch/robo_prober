@@ -353,6 +353,19 @@ void Core::findI2c(I2cBus &bus, int sda, int scl, bool fixed) {
   }
 }
 
+bool Core::verifyI2c(I2cBus &bus, int sda, int scl) {
+  bus_ = &bus;
+  if (sda < 0 || scl < 0 || sda >= kGpioCount || scl >= kGpioCount || sda == scl) return false;
+  const int pair[2] = {sda, scl};
+  for (int g : pair) {
+    uint8_t flags = board_.pinFlags(g);
+    if (!(flags & kPinUsable) || (flags & kPinInputOnly) || board_.pinInUse(g)) return false;
+    if (classes_[g] != PinClass::PulledUp && classes_[g] != PinClass::DrivenHigh) return false;
+  }
+  findI2c(bus, sda, scl, true);
+  return pca_address_ != 0;
+}
+
 void Core::releaseAll(Fault reason) {
   // Always clear software state, even if the driver reports an error.
   bool ok = driver_.releaseAll();

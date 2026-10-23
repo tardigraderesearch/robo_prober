@@ -32,7 +32,7 @@
 namespace rp {
 
 constexpr const char *kProtocol = "ROBOPROBE/1";
-constexpr const char *kFirmwareVersion = "0.3.0";
+constexpr const char *kFirmwareVersion = "0.3.1";
 constexpr int kChannels = 16;                       // PCA9685 outputs: channel 0..15
 constexpr int kGpioBase = 100;                      // a probed GPIO N is channel 100+N
 constexpr int kGpioCount = 49;                      // GPIO0..48 (pin_profiles.h)
@@ -149,6 +149,12 @@ class Core {
   // where the driver lives (pcaAddress() == 0: none found). Keeps `bus` for
   // I2C_SCAN.
   void findI2c(I2cBus &bus, int sda = -1, int scl = -1, bool fixed = false);
+  // Boot-time check of a remembered pair (the firmware caches the pins it found
+  // in NVS): only pins the profile allows, that are not input-only and that the
+  // survey found held high (I2C pull-ups) are probed, so a stale cache never
+  // drives a pin something else now holds low. True when a PCA9685 answers
+  // there; otherwise nothing is set and the caller falls back to findI2c(bus).
+  bool verifyI2c(I2cBus &bus, int sda, int scl);
   // Without findI2c (protocol-only build), I2C_SCAN answers no devices.
   int i2cSda() const { return i2c_sda_; }
   int i2cScl() const { return i2c_scl_; }

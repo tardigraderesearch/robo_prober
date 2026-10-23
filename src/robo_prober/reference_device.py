@@ -24,7 +24,7 @@ import re
 from dataclasses import dataclass
 
 PROTOCOL = "ROBOPROBE/1"
-FIRMWARE_VERSION = "0.3.0"
+FIRMWARE_VERSION = "0.3.1"
 CHANNELS = 16          # PCA9685 outputs: channel 0..15
 GPIO_BASE = 100        # a probed GPIO N is channel 100+N
 GPIO_COUNT = 49

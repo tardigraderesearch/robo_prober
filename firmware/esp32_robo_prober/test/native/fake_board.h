@@ -74,10 +74,15 @@ class FakeI2c : public rp::I2cBus {
   int sda = -1;
   int scl = -1;
   int written = 0;  // PCA9685 register writes (all-off)
+  int begins = 0;   // bus openings (one per pair scanned, plus the driver's)
+  bool touched[rp::kGpioCount] = {false};  // pins the bus was ever opened on
 
   bool begin(int s, int c) override {
     sda = s;
     scl = c;
+    ++begins;
+    if (s >= 0 && s < rp::kGpioCount) touched[s] = true;
+    if (c >= 0 && c < rp::kGpioCount) touched[c] = true;
     return true;
   }
   int probe(uint8_t address) override {
