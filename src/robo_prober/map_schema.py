@@ -12,7 +12,9 @@ from typing import Any
 SCHEMA_VERSION = 1
 JOINT_NAME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_]{0,63}$")
 # Joints are servos; everything else the find-servos step names goes in "devices".
-DEVICE_KINDS = ("servo", "led", "button", "i2c", "sensor", "unknown")
+# A "faulty_servo" moved one way only (broken feedback, or continuous rotation):
+# it is never a joint, so nothing tries to hold a position with it.
+DEVICE_KINDS = ("servo", "faulty_servo", "led", "button", "i2c", "sensor", "unknown")
 
 
 class MapValidationError(ValueError):

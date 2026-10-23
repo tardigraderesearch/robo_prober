@@ -579,3 +579,62 @@ def test_bench_buzz_keeps_holding(tmp_path):
         assert _slot(app.controller.transport.connection.device, a.channel).min_us == 1200   # band restored
     finally:
         app.close()
+
+
+def test_identify_one_way_only_marks_faulty_and_bench_and_rom_skip_it(tmp_path):
+    """His pitch2 turns the same way for every pulse: O records it as faulty with a note."""
+    import time
+
+    from robo_prober.rom_gui import RomApp
+
+    root = _fw_root()
+    app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
+    app.wiggle_slew_us_s = 2000
+    try:
+        app.cutoff_var.set(True)
+        app.connect_and_arm()
+        app.discover()
+        device = app.controller.transport.connection.device
+        # a working servo first, so the map can be saved
+        servo = next(t for t in app._identify_targets() if t.pin == 4)
+        app.jump_to(servo.key)
+        app.answer("servo")
+        app.name_var.set("shoulder")
+        app.save_name()
+        # the faulty one on a PCA9685 channel: buzz it, answer O
+        app.jump_to("PCA9685 ch 2")
+        app.do_wiggle()
+        for _ in range(400):
+            app.tick(0.05)
+            time.sleep(0.005)
+            if app.wiggle is None:
+                break
+        assert app.wiggle is None and device.output(2) == 1500            # PCA channel still held
+        assert app.root.bind("o") and app.root.bind("O")                  # key O
+        app.answer("faulty")
+        assert app.name_row.winfo_manager() == "grid"
+        app.name_var.set("pitch2")
+        asked = []
+        app.ask_fn = lambda title, text, options: asked.append(text) or "Disarm now"
+        app.save_name()
+        assert "broken feedback can keep pushing" in asked[0]
+        assert not app.armed and device.output(2) is None                  # let go of it
+        found = app.found["PCA9685 ch 2"]
+        assert found.kind == "faulty" and "one way only" in found.note
+        row = next(r for r in app.found_table.get_children()
+                   if app.found_table.item(r, "values")[0] == "PCA9685 ch 2")
+        assert "FAULTY" in app.found_table.item(row, "values")[1]
+
+        # bench: shown greyed, refused with a reason
+        assert app.bench_tiles["PCA9685 ch 2"]["faulty"] and "PCA9685 ch 2" not in app._bench_servos()
+        app.add_to_bench("PCA9685 ch 2")
+        assert app.bench == [] and "marked faulty" in app.last_error
+
+        # range of motion: not a row, explained
+        app.cutoff_var.set(True)
+        app.go_to_rom(tmp_path / "f.map.json")
+        assert set(app.rows) == {104}
+        assert "pitch2 (ch 2) is marked faulty" in app.faulty_rows.cget("text")
+        assert app.faulty_rows.winfo_manager() == "grid"
+    finally:
+        app.close()

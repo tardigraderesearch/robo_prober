@@ -37,6 +37,11 @@ BUZZ_CYCLES = 3                   # back-and-forth swings per wiggle (~0.6 s in 
 BLINK_COUNT = 3
 MAX_I2C_PAIRS = 30
 DRIVEN = ("driven_high", "driven_low")
+# A servo that turns the same way for every pulse (or keeps spinning) has broken
+# position feedback, or is a continuous-rotation servo: it cannot hold a position,
+# so the bench and range of motion refuse it.
+FAULTY_NOTE = ("moved one way only / kept spinning for every pulse: broken position feedback "
+               "(or a continuous-rotation servo); it cannot hold a position")
 
 
 @dataclass
@@ -95,9 +100,10 @@ class Target:
 @dataclass
 class Found:
     target: Target
-    kind: str                   # servo, led, button, unknown (nothing seen), unused
+    kind: str                   # servo, faulty (servo that moved one way only), led, button, unknown, unused
     name: str = ""
     start_us: int | None = None
+    note: str = ""
 
 
 def _split(text: str | None) -> list[str]:
@@ -259,6 +265,11 @@ def build_map(info: dict[str, str], survey: Survey, found: list[Found]) -> dict[
             }
             if target.pin is not None:
                 joints[name]["pin"] = target.pin
+        elif item.kind == "faulty":
+            # Never a joint: nothing downstream may try to hold a position with it.
+            devices[name] = {"kind": "faulty_servo", "pin": target.pin, "channel": target.channel,
+                             "route": "gpio" if target.pin is not None else "pca9685",
+                             "note": item.note or FAULTY_NOTE}
         else:
             devices[name] = {"kind": item.kind, "pin": target.pin}
     for (sda, scl), addresses in sorted(survey.i2c.items()):
@@ -268,7 +279,7 @@ def build_map(info: dict[str, str], survey: Survey, found: list[Found]) -> dict[
             devices[name] = {"kind": "i2c", "sda": sda, "scl": scl, "address": address,
                              "pca9685": address in survey.pca_addresses and (sda, scl) == survey.pca_bus}
     if not joints:
-        raise ValueError("no servo has a name yet: identify at least one servo before saving")
+        raise ValueError("no working servo has a name yet: identify at least one servo before saving")
     controller = {key: info[key] for key in ("id", "fw", "proto") if key in info}
     hardware_map = {
         "schema_version": SCHEMA_VERSION,
@@ -291,5 +302,5 @@ def build_map(info: dict[str, str], survey: Survey, found: list[Found]) -> dict[
     return hardware_map
 
 
-__all__ = ["DEFAULT_DELTA_US", "DEFAULT_START_US", "Found", "PinInfo", "Survey", "Target", "Wiggle", "blink",
+__all__ = ["DEFAULT_DELTA_US", "DEFAULT_START_US", "FAULTY_NOTE", "Found", "PinInfo", "Survey", "Target", "Wiggle", "blink",
            "build_map", "channel_name", "discover", "safe_name", "targets"]

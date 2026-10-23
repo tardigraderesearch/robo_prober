@@ -41,6 +41,8 @@ from .rom import (
     apply_rom_to_map,
     channel_name,
     channels_from_map,
+    faulty_reason,
+    faulty_servos,
     set_last_positions,
 )
 
@@ -53,6 +55,8 @@ NO_ROWS_TEXT = "Find servos first (steps 1 and 2), or open a saved map."
 CLASS_TEXT = {"floating": "floating (nothing, or a servo/LED input)", "pulled_up": "pulled up (resistor: button, I2C)",
               "pulled_down": "pulled down (resistor, LED)", "driven_high": "DRIVEN high by something: never driven",
               "driven_low": "DRIVEN low by something: never driven", "reserved": "reserved"}
+KIND_TEXT = {"servo": "servo", "faulty": "FAULTY servo (one way only)", "led": "light / sound", "button": "button",
+             "unused": "nothing"}
 SOURCE_TEXT = {"last_position": "last saved position", "rom_midpoint": "middle of the saved range",
                "operator": "your value", "none": "no saved position - check this value"}
 
@@ -224,6 +228,9 @@ class RomApp:
         self.save_btn.grid(row=0, column=4)
         self.no_rows = ttk.Label(rom_tab, text=NO_ROWS_TEXT, style="Big.TLabel")
         self.no_rows.grid(row=1, column=0, sticky="w", padx=6, pady=(0, 6))
+        self.faulty_rows = ttk.Label(rom_tab, style="Error.TLabel", wraplength=900, justify="left")
+        self.faulty_rows.grid(row=3, column=0, sticky="w", padx=6, pady=(6, 0))
+        self.faulty_rows.grid_remove()
 
         # channel rows (scrollable, so they stay usable in a small tiled window)
         box = ttk.LabelFrame(rom_tab, text="Servos", padding=(6, 4))
@@ -296,7 +303,7 @@ class RomApp:
             widget.pack(side="left", padx=(0, 6))
         self.auto_next_var = tk.BooleanVar(value=True)
         ttk.Checkbutton(actions, text="Buzz the next pin after No", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
-        ttk.Label(actions, text="Keys: Space buzz · Y servo · L light · N no · S skip · B back",
+        ttk.Label(actions, text="Keys: Space buzz · Y servo · O one way only · L light · N no · S skip · B back",
                   style="Muted.TLabel").pack(side="left", padx=(12, 0))
 
         def key(action):
@@ -307,6 +314,7 @@ class RomApp:
                 return "break"
             return handler
         for keys, action in (("<space>", self.do_wiggle), ("yY", lambda: self.answer("servo")),
+                             ("oO", lambda: self.answer("faulty")),
                              ("lL", lambda: self.answer("led")), ("nN", lambda: self.answer("unused")),
                              ("sS", self.skip_target), ("bB", self.back_target)):
             for k in ([keys] if keys.startswith("<") else list(keys)):
@@ -315,8 +323,8 @@ class RomApp:
         self.answer_row = ttk.Frame(tab)
         self.answer_row.grid(row=3, column=0, sticky="w", pady=(8, 0))
         ttk.Label(self.answer_row, text="What happened?", style="Big.TLabel").pack(side="left", padx=(0, 8))
-        for text, kind in (("Servo moved", "servo"), ("Light / sound", "led"), ("Nothing", "unused"),
-                           ("Try again", "again")):
+        for text, kind in (("Servo moved", "servo"), ("Moved one way only / spins", "faulty"),
+                           ("Light / sound", "led"), ("Nothing", "unused"), ("Try again", "again")):
             ttk.Button(self.answer_row, text=text, command=lambda k=kind: self.answer(k)).pack(side="left", padx=(0, 6))
         self.name_row = ttk.Frame(tab)
         self.name_row.grid(row=4, column=0, sticky="w", pady=(8, 0))
@@ -594,7 +602,15 @@ class RomApp:
         self.hardware_map, self.map_path = hardware_map, path
         self.map_var.set(str(path))
         self._set_channels(roms)
-        self._say(f"Loaded {len(roms)} channel(s) from {path.name}.")
+        faulty = faulty_servos(hardware_map)
+        if faulty:
+            self.faulty_rows.configure(text="Not offered: " + " ".join(
+                faulty_reason(name, ch, note) for ch, (name, note) in sorted(faulty.items())))
+            self.faulty_rows.grid()
+        else:
+            self.faulty_rows.grid_remove()
+        self._say(f"Loaded {len(roms)} channel(s) from {path.name}."
+                  + (f" Skipped {len(faulty)} faulty servo(s)." if faulty else ""))
 
     def _port(self) -> str | None:
         port = self.port_var.get().strip()
@@ -1022,7 +1038,7 @@ class RomApp:
         table = self.found_table
         table.delete(*table.get_children())
         for item in self.found.values():
-            what = {"servo": "servo", "led": "light / sound", "button": "button", "unused": "nothing"}[item.kind]
+            what = KIND_TEXT.get(item.kind, item.kind)
             table.insert("", "end", values=(item.target.key, what, item.name or "-"))
         self._refresh_bench()
 
@@ -1115,8 +1131,30 @@ class RomApp:
         if not kind:
             return
         start = self._wiggle_values()[0] if kind == "servo" and self._wiggle_values() else None
-        self.found[target.key] = find.Found(target, kind, name, start)
+        note = find.FAULTY_NOTE if kind == "faulty" else ""
+        self.found[target.key] = find.Found(target, kind, name, start, note)
+        self.bench_roms.pop(target.key, None)
+        if kind == "faulty":
+            self._release_faulty(target, name)
         self._next_target()
+        if kind == "faulty":
+            self._say(f"{name} ({target.key}) saved as FAULTY: {note}. The bench and range of motion skip it. "
+                      + (f"Next: {self.current_target().key}." if self.current_target() else "All pins done."))
+
+    def _release_faulty(self, target: find.Target, name: str) -> None:
+        """A servo with broken feedback can keep pushing while it is held: offer to let go of it."""
+        if not self.armed or self.controller.position(target.channel) is None:
+            return
+        if target.pin is not None:
+            try:
+                self.controller.release_pin(target.pin)
+            except Exception as error:  # noqa: BLE001
+                self._probe_error(error)
+            return
+        text = (f"{name} ({target.key}) is still being driven: PCA9685 channels are held until Disarm, and a servo "
+                "with broken feedback can keep pushing. Disarm now (releases every output)?")
+        if self.ask_fn("Faulty servo still held", text, ["Disarm now", "Keep holding"]) == "Disarm now":
+            self.disarm()
 
     def skip_target(self) -> None:
         target = self.current_target()
@@ -1238,6 +1276,9 @@ class RomApp:
     def _bench_servos(self) -> dict[str, find.Found]:
         return {key: item for key, item in self.found.items() if item.kind == "servo"}
 
+    def _faulty_servos(self) -> dict[str, find.Found]:
+        return {key: item for key, item in self.found.items() if item.kind == "faulty"}
+
     def _bench_name(self, key: str) -> str:
         found = self.found.get(key)
         return (found.name if found is not None and found.name else key)
@@ -1310,6 +1351,11 @@ class RomApp:
             self.add_to_bench(key)
 
     def add_to_bench(self, key: str) -> None:
+        faulty = self._faulty_servos().get(key)
+        if faulty is not None:
+            self._say(f"{self._bench_name(key)} ({key}) is marked faulty: {faulty.note or find.FAULTY_NOTE}. "
+                      "It can't go on the bench; redo it in step 2 if that was a mistake.", error=True)
+            return
         if key not in self._bench_servos() or key in self.bench:
             return
         self.bench.append(key)
@@ -1378,18 +1424,25 @@ class RomApp:
             widget.bind("<B1-Motion>", self._drag_motion)
             widget.bind("<ButtonRelease-1>", self._drag_release)
 
-    def _build_tile(self, key: str) -> dict[str, Any]:
+    def _build_tile(self, key: str, faulty: bool = False) -> dict[str, Any]:
+        cursor = "X_cursor" if faulty else "hand2"
         frame = tk.Frame(self.tiles_box, background=theme.SURFACE, highlightthickness=2,
-                         highlightbackground=theme.BORDER, padx=10, pady=6, cursor="hand2")
+                         highlightbackground=theme.BORDER, padx=10, pady=6, cursor=cursor)
         frame.pack(fill="x", pady=(0, 6))
         name = tk.Label(frame, text=self._bench_name(key), font=theme.FONT_BOLD, background=theme.SURFACE,
-                        foreground=theme.TEXT, anchor="w", cursor="hand2")
+                        foreground=theme.MUTED if faulty else theme.TEXT, anchor="w", cursor=cursor)
         name.pack(fill="x")
-        where = tk.Label(frame, background=theme.SURFACE, foreground=theme.MUTED, anchor="w", cursor="hand2",
-                         font=theme.FONT)
+        where = tk.Label(frame, background=theme.SURFACE, foreground=theme.MUTED, anchor="w", cursor=cursor,
+                         font=theme.FONT, justify="left")
         where.pack(fill="x")
-        self._draggable([frame, name, where], key, "tile")
-        return {"frame": frame, "name": name, "where": where}
+        if faulty:
+            # not draggable: a click explains why it can't go on the bench
+            where.configure(text=f"{self.found[key].target.key}  ·  FAULTY: moves one way only")
+            for widget in (frame, name, where):
+                widget.bind("<ButtonRelease-1>", lambda e, k=key: self.add_to_bench(k))
+        else:
+            self._draggable([frame, name, where], key, "tile")
+        return {"frame": frame, "name": name, "where": where, "faulty": faulty}
 
     def _build_bench_row(self, key: str) -> dict[str, Any]:
         found = self.found[key]
@@ -1432,18 +1485,20 @@ class RomApp:
         if not hasattr(self, "bench_zone") or self._closed:
             return
         servos = self._bench_servos()
+        faulty = self._faulty_servos()
         self.bench = [key for key in self.bench if key in servos]
-        if list(servos) != list(self.bench_tiles):
+        if list(servos) + list(faulty) != list(self.bench_tiles):
             for tile in self.bench_tiles.values():
                 tile["frame"].destroy()
             self.bench_tiles = {key: self._build_tile(key) for key in servos}
+            self.bench_tiles.update({key: self._build_tile(key, faulty=True) for key in faulty})
         for key in [k for k in self.bench_rows if k not in self.bench]:
             self.bench_rows.pop(key)["frame"].destroy()
         for index, key in enumerate(self.bench):
             if key not in self.bench_rows:
                 self.bench_rows[key] = self._build_bench_row(key)
             self.bench_rows[key]["frame"].grid(row=index, column=0, sticky="ew", padx=2, pady=4)
-        if servos:
+        if servos or faulty:
             self.no_tiles.pack_forget()
         else:
             self.no_tiles.pack(anchor="w")
@@ -1455,6 +1510,8 @@ class RomApp:
         ready = self.armed and self.wiggle is None
         powered = {key: self._bench_powered(key) for key in servos}
         for key, tile in self.bench_tiles.items():
+            if tile["faulty"]:
+                continue
             channel = servos[key].target.channel
             pulse = self.controller.position(channel) if powered[key] else None
             where = f"{pulse} us" if pulse is not None else "off"

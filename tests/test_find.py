@@ -123,3 +123,27 @@ def test_wiggle_is_a_quick_buzz():
     assert ctl.limits == (start - d, start + d, 2000)  # fast, but the firmware band still clamps it
     swing_s = sum(abs(b - a) for a, b in zip([start] + w.steps, w.steps)) / ctl.limits[2]
     assert swing_s < 1.0
+
+
+def test_faulty_servo_is_a_device_never_a_joint_and_rom_refuses_it(setup):
+    from robo_prober.find import FAULTY_NOTE
+    from robo_prober.map_schema import validate_map
+    from robo_prober.rom import RomError, faulty_servos, set_rom
+
+    ctl, _ = setup
+    survey = discover(ctl)
+    found = [Found(Target(4), "servo", "shoulder", 1500),
+             Found(Target(pca_channel=2), "faulty", "pitch2", None, FAULTY_NOTE)]
+    hw = build_map(ctl.info, survey, found)
+    validate_map(hw)
+    assert "pitch2" not in hw["joints"]
+    assert hw["devices"]["pitch2"]["kind"] == "faulty_servo" and hw["devices"]["pitch2"]["channel"] == 2
+    assert "one way only" in hw["devices"]["pitch2"]["note"]
+    assert faulty_servos(hw) == {2: ("pitch2", FAULTY_NOTE)}
+    assert [r.channel for r in channels_from_map(hw)] == [104]
+    with pytest.raises(RomError, match="pitch2 .*faulty.*refused"):
+        channels_from_map(hw, [2])
+    with pytest.raises(RomError, match="faulty"):
+        set_rom(hw, 2, 1400, 1600, set_by="test")
+    with pytest.raises(ValueError, match="no working servo"):
+        build_map(ctl.info, survey, found[1:])

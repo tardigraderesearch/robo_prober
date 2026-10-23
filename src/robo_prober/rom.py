@@ -364,10 +364,26 @@ def _now() -> str:
     return datetime.now(timezone.utc).replace(microsecond=0).isoformat().replace("+00:00", "Z")
 
 
+def faulty_servos(hardware_map: dict[str, Any]) -> dict[int, tuple[str, str]]:
+    """Servos the operator marked faulty (moved one way only): channel -> (name, note)."""
+    found = {}
+    for name, values in (hardware_map.get("devices") or {}).items():
+        if values.get("kind") == "faulty_servo" and values.get("channel") is not None:
+            found[int(values["channel"])] = (name, str(values.get("note") or "marked faulty"))
+    return found
+
+
+def faulty_reason(name: str, channel: int, note: str) -> str:
+    return f"{name} ({channel_name(channel)}) is marked faulty: {note}. Range of motion is refused for it."
+
+
 def _joint_for_channel(hardware_map: dict[str, Any], channel: int) -> str:
     for joint, values in hardware_map["joints"].items():
         if int(values["channel"]) == channel:
             return joint
+    faulty = faulty_servos(hardware_map).get(channel)
+    if faulty is not None:
+        raise RomError(faulty_reason(faulty[0], channel, faulty[1]))
     raise MapValidationError(f"channel {channel} is not in the hardware map")
 
 
@@ -438,6 +454,10 @@ def channels_from_map(hardware_map: dict[str, Any], selected: list[int] | None =
             rom.band_half_us = max(band_half_us, rom.center - low, high - rom.center)
         rows.append(rom)
     missing = set(selected or ()) - {rom.channel for rom in rows}
+    faulty = faulty_servos(hardware_map)
+    refused = sorted(missing & set(faulty))
+    if refused:
+        raise RomError(" ".join(faulty_reason(faulty[ch][0], ch, faulty[ch][1]) for ch in refused))
     if missing:
         raise MapValidationError(f"channels not in the hardware map: {sorted(missing)}")
     return sorted(rows, key=lambda rom: rom.channel)
