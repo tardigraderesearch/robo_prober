@@ -1,5 +1,9 @@
 # robo-prober
 
+![robo-prober finding and ranging the servos of a real arm](docs/demo.gif)
+
+*Real run, 8x speed: Discover, Identify (buzz each pin, name what moved), range of motion. [Full video](docs/demo.mp4).*
+
 **To use:** `cd robo_prober`, then run `python robo_prober.py`
 
 It checks what it needs, asks before installing anything (Y/n), or says it's good to go
@@ -13,18 +17,17 @@ what you learned as a validated hardware map or URDF.
 
 ## Hardware test status
 
-| Passed on real hardware (ESP32-S3) | Physical test pending |
+| Passed on real hardware (ESP32-S3, 2026-10-22) | Physical test pending |
 |---|---|
 | Pin survey (driven / pulled / floating), no PCA9685 needed | ESP32, S2, C3, C6 (builds and simulator only) |
-| Identify: one-pin buzz, Y/N, naming | Raspberry Pi 4 / 5 / Zero 2 W and Jetson Orin agent (emulated GPIO only) |
-| Range of motion (ROM 1 / ROM 2, relative sliders, narrow/widen) | Firmware backup / install / restore from the app (esptool mocked in tests) |
+| Identify: pins in order, quick buzz, Y/N, naming, next pin buzzes automatically; boot pins left out | Raspberry Pi 4 / 5 / Zero 2 W and Jetson Orin agent (emulated GPIO only) |
+| Range of motion (ROM 1 / ROM 2, relative sliders, narrow/widen) | Firmware backup and restore from the app |
 | E-stop latch, disarm, map save | PCA9685 discovery, LED blink, button watch, I2C scan on hardware |
-| | "Set all servos to 0" |
-| | Bench tab (step 3): drag servos on, power up, group slider with Invert, buzz, Use as start, widen/narrow |
-| | Identify: "Moved one way only / spins" (key O) marks a servo faulty; bench and range of motion refuse it |
-| | Identify: servo type after Y (type-ahead or 20 questions); its safe band as the starting ROM band |
-| | Connect: firmware check in the background (window stays responsive on a silent board) |
-| | Firmware 0.3.1: PCA9685 pins cached in NVS, checked first on boot, scan as fallback (all envs build; native simulator only) |
+| Firmware check on Connect (background) and install from the app: 0.3.0 → 0.3.1 | "Set all servos to 0" |
+| | Bench tab (step 3): drag servos on, group slider with Invert, buzz, Use as start |
+| | Identify: "Moved one way only / spins" (key O) marks a servo faulty |
+| | Identify: servo type (type-ahead or 20 questions) and its safe starting band |
+| | Firmware 0.3.1: PCA9685 pins cached in NVS (no PCA9685 on the test arm) |
 
 Everything in the right column is covered by automated tests but has not yet run on a physical board.
 
