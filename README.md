@@ -11,7 +11,6 @@ what you learned as a validated hardware map or URDF.
 
 [![CI](https://github.com/evilhobo1911/robo_prober/actions/workflows/ci.yml/badge.svg)](https://github.com/evilhobo1911/robo_prober/actions/workflows/ci.yml)
 
-
 ## Hardware test status
 
 | Passed on real hardware (ESP32-S3) | Physical test pending |
@@ -540,8 +539,3 @@ synthetic two-link arm and runs the whole pipeline. See
 ## License
 
 MIT. See [LICENSE](LICENSE).
-
-## How this was built
-AI is used here as a tool to speed up implementation. I design the system and
-define what "working" means. When issues are found, they're identified, and
-ARI — my own agent system — fixes them against those checks.
