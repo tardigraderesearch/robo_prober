@@ -34,7 +34,8 @@ def test_discover_classifies_pins_without_driving_anything(setup):
     assert "PCA9685 at 0x40 on SDA 8 / SCL 9" in survey.summary()
     assert device.write_log == [] and device.level_log == []
     keys = [t.key for t in targets(survey)]
-    assert keys[0] == "GPIO 1" and "GPIO 4" in keys and "PCA9685 ch 0" in keys
+    pins = [int(k.split()[1]) for k in keys if k.startswith("GPIO ")]
+    assert pins == sorted(pins) and "GPIO 4" in keys and keys[-1].startswith("PCA9685 ch")  # pin-number order
     assert "GPIO 7" not in keys                              # driven: never a target
     assert keys.index("GPIO 5") > keys.index("GPIO 21")      # pulled pins after floating ones
     assert keys[-1] in ("GPIO 0", "GPIO 3", "GPIO 45")       # strapping pins last

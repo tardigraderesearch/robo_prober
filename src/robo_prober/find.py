@@ -155,15 +155,13 @@ def discover(ctl, *, scan_i2c: bool = True) -> Survey:
 
 
 def targets(survey: Survey) -> list[Target]:
-    """What to identify, in order: floating pins, resistively pulled pins, PCA9685
-    channels, then boot-strapping / JTAG pins. Driven, reserved and input-only
-    pins are never targets."""
-    usable = [info for info in survey.pins if info.drivable]
-    first = [Target(info.pin, cls=info.cls) for info in usable if not info.last and info.cls == "floating"]
-    pulled = [Target(info.pin, cls=info.cls) for info in usable if not info.last and info.cls != "floating"]
+    """What to identify: every drivable GPIO in pin-number order (boot-strapping /
+    JTAG pins still ask for a confirmation when reached), then PCA9685 channels.
+    Driven, reserved and input-only pins are never targets."""
+    usable = sorted((info for info in survey.pins if info.drivable), key=lambda info: info.pin)
+    pins = [Target(info.pin, cls=info.cls, last=info.last) for info in usable]
     pca = [Target(pca_channel=ch, cls="pca9685") for ch in range(16)] if survey.pca_addresses else []
-    last = [Target(info.pin, cls=info.cls, last=True) for info in usable if info.last]
-    return first + pulled + pca + last
+    return pins + pca
 
 
 class Wiggle:
