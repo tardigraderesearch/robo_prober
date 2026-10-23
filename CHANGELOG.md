@@ -7,11 +7,31 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Step 3, the bench: drag identified servos onto it, power them up after one
+  confirmation, move them one by one or together (group slider, Invert per
+  servo), buzz one or all, "Use as start" for step 4, widen/narrow the band.
+  Range of motion is now step 4. Physical test pending.
+- Identify: "Moved one way only / spins" (key O) saves a servo as faulty with a
+  note (broken position feedback or continuous rotation). It goes into the map
+  as a `faulty_servo` device, never a joint; the bench shows it greyed and
+  refuses it, range of motion lists it as not offered, and `rom` refuses its
+  channel with the reason. A faulty servo still held on a PCA9685 channel is
+  released by disarming. Physical test pending.
+- Identify: optional servo type after Y, by type-ahead (`servo_db.search`) or
+  the 20-questions identifier in a small dialog. The id and model go into the
+  map joint as `servo_type` with `safe_start_us` from `servo_db.safe_pulse_range`,
+  which is that servo's starting band on the bench and in range of motion.
+  Physical test pending.
+- Firmware 0.3.1: the PCA9685 pins found at boot are cached in NVS
+  (Preferences, with the board profile). The next boot checks only that pair,
+  and only if the survey still sees pull-ups there, then falls back to the full
+  scan. Native simulator test added; all PlatformIO envs build; prebuilt images
+  rebuilt. Physical test pending.
 - Servo database: `servo_db` and `data/servos.json` cover 133 hobby and robot
   servos (96 checked against manufacturer pages, all cited). It provides
   type-ahead `search()`, `get()`, a conservative `safe_pulse_range()` for the
   ROM step and a data-driven 20-questions `Identifier`. `to_dtg()` maps an
-  entry to the digital-twin servo-library shape. No GUI yet.
+  entry to the digital-twin servo-library shape. Used by Identify (above).
 - Firmware backup and install: on Connect, a board not running the current
   robo-prober firmware (foreign, or older robo-prober without the needed caps)
   gets one confirmation, then its whole flash is backed up to
@@ -43,6 +63,8 @@ All notable changes to this project are documented here. The format follows
 - Hardware maps may list non-servo parts under `devices` (led, button, i2c, ...).
 
 ### Changed
+- Connect: the firmware HELLO check runs off the Tk thread, so a silent board
+  no longer freezes the window; the action that asked continues by itself.
 - PlatformIO uses the pioarduino platform (Arduino core 3.x, pinned) for every
   environment, since ESP32-C6 needs it. `RP_PCA9685_ADDR` is gone (the first
   PCA9685 found is used; all are reported).

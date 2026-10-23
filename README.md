@@ -19,7 +19,12 @@ what you learned as a validated hardware map or URDF.
 | Identify: one-pin buzz, Y/N, naming | Raspberry Pi 4 / 5 / Zero 2 W and Jetson Orin agent (emulated GPIO only) |
 | Range of motion (ROM 1 / ROM 2, relative sliders, narrow/widen) | Firmware backup / install / restore from the app (esptool mocked in tests) |
 | E-stop latch, disarm, map save | PCA9685 discovery, LED blink, button watch, I2C scan on hardware |
-| | "Set all servos to 0", servo database picker |
+| | "Set all servos to 0" |
+| | Bench tab (step 3): drag servos on, power up, group slider with Invert, buzz, Use as start, widen/narrow |
+| | Identify: "Moved one way only / spins" (key O) marks a servo faulty; bench and range of motion refuse it |
+| | Identify: servo type after Y (type-ahead or 20 questions); its safe band as the starting ROM band |
+| | Connect: firmware check in the background (window stays responsive on a silent board) |
+| | Firmware 0.3.1: PCA9685 pins cached in NVS, checked first on boot, scan as fallback (all envs build; native simulator only) |
 
 Everything in the right column is covered by automated tests but has not yet run on a physical board.
 
@@ -220,13 +225,25 @@ wiring.
 2. **Identify** (after Connect & arm). One pin (or PCA9685 channel) at a time:
    "GPIO 4: it will go to 1500 µs, then wiggle ±150 µs slowly. Make sure it's
    clear." Press **Wiggle as servo** or **Blink** (LEDs, buzzers), then say what
-   happened (**Servo moved**, **Light / sound**, **Nothing**, **Try again**) and
-   name it ("shoulder"). Floating pins come first, then pulled ones, then PCA9685
+   happened (**Servo moved**, **Moved one way only / spins**, **Light / sound**,
+   **Nothing**, **Try again**; keys Y, O, L, N) and name it ("shoulder"). After
+   Y you can give the **servo type** (optional): type-ahead over the servo
+   database, or **Don't know? Identify it** for a 20-questions helper. Its
+   conservative safe band (never wider than 1000-2000 µs) becomes that servo's
+   starting band on the bench and in range of motion, and its id goes in the map.
+   A servo that turns the same way for every pulse (broken feedback, or a
+   continuous-rotation servo) is saved as **faulty** with a note: the bench and
+   range of motion skip it and say why, and if it is still held on a PCA9685
+   channel everything is disarmed. Floating pins come first, then pulled ones, then PCA9685
    channels, then boot-strapping pins (after a confirmation). Every GPIO is
    released after its probe. **Save hardware map**, then **Go to range of
    motion**.
-3. **Range of motion** shows only the named servos, labelled with their names,
-   each starting where its wiggle left it.
+3. **Bench**: drag identified servos onto the bench (or click them), **Power
+   up** (one confirmation), then move them one by one or together with the
+   group slider (**Invert** flips one), each inside its start ±300 µs (or its
+   servo type's band). **Buzz**, **Use as start**, **Widen** / **Narrow**.
+4. **Range of motion** shows only the named servos, labelled with their names,
+   each starting where its wiggle (or the bench) left it.
 
 A servo straight on GPIO N is channel `100+N` everywhere (map, API, protocol).
 E-STOP and Esc work throughout.
