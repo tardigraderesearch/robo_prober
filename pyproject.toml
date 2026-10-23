@@ -33,6 +33,11 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sbc = [
+  "gpiod>=2.2,<3; sys_platform == 'linux'",
+  "lgpio>=0.2.2.0; sys_platform == 'linux'",
+  "smbus2>=0.4.3",
+]
 identify = [
   "esptool>=5.0",
 ]
