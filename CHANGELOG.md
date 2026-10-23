@@ -7,6 +7,9 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Fixed
+- One entry point: `python robo_prober.py` on every OS. It asks (Y/n) before
+  installing its libraries into a private `.venv`, or says it's good to go and starts.
+  `run.sh`, `run.bat`, `run.command` and `launcher.py` are gone.
 - `run.bat` failed on Windows because cmd mis-parsed Python one-liners inside
   `for /f` and parenthesised blocks. `run.sh`, `run.command` and `run.bat` now only
   find Python 3.11+ and hand over to a shared, stdlib-only `launcher.py`, so setup

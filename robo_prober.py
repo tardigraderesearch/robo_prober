@@ -1,17 +1,13 @@
-"""robo-prober bootstrap, shared by run.sh, run.command and run.bat.
+"""robo-prober. To use:  python robo_prober.py  [command]
 
-The platform launchers only find a Python 3.11+ and hand over to this file,
-so every OS gets the same behaviour:
+One file, any OS. It checks Python and Tk, and if the libraries are missing it asks
+before installing them into a private .venv next to this file (nothing system-wide).
+When everything is there it says so and starts. With no command it opens the
+range-of-motion window; any command (doctor, rom, run-demo, ...) passes straight through.
 
-1. check Tk (needed for the window, not for generate / verify / doctor),
-2. make a private .venv next to this file (first run only),
-3. install / update the package only when pyproject.toml or Python changed,
-4. launch the range-of-motion window, or pass any arguments straight through.
-
-Status messages go to stderr so command output on stdout stays clean.
+-y / --yes, or a non-interactive run, installs without asking.
 ROBO_PROBER_EXTRAS picks the pip extras (default: identify; none = core only).
-
-Standard library only. Nothing is installed system-wide.
+Standard library only above the install step.
 """
 
 import hashlib
@@ -20,6 +16,18 @@ import platform
 import shutil
 import subprocess
 import sys
+
+if __name__ == "robo_prober":
+    # Imported (not run) from this folder: this file has the package's name, so hand
+    # the import over to the real package in src/ instead of shadowing it.
+    import importlib.util
+
+    _init = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src", "robo_prober", "__init__.py")
+    _spec = importlib.util.spec_from_file_location(
+        "robo_prober", _init, submodule_search_locations=[os.path.dirname(_init)])
+    _pkg = importlib.util.module_from_spec(_spec)
+    sys.modules["robo_prober"] = _pkg
+    _spec.loader.exec_module(_pkg)
 
 APP = "robo-prober"
 MODULE = "robo_prober"
@@ -34,7 +42,7 @@ WINDOWS = os.name == "nt"
 VPY = os.path.join(VENV, "Scripts", "python.exe") if WINDOWS else os.path.join(VENV, "bin", "python")
 STAMP = os.path.join(VENV, ".%s-installed" % APP)
 SYSTEM = platform.system()
-RUN = "run.bat" if WINDOWS else "./run.sh"
+RUN = "python robo_prober.py"
 
 
 class Problem(Exception):
@@ -58,7 +66,7 @@ def python_fix():
     if SYSTEM == "Darwin":
         return [
             "Install Python 3.12 from https://www.python.org/downloads/macos/",
-            "(or with Homebrew: brew install python@3.12 python-tk@3.12), then run ./run.sh again.",
+            "(or with Homebrew: brew install python@3.12 python-tk@3.12), then run python3 robo_prober.py again.",
         ]
     return [
         "Install Python 3.11 or newer with your package manager, for example:",
@@ -67,7 +75,7 @@ def python_fix():
         "  Arch:          sudo pacman -S python tk",
         "  openSUSE:      sudo zypper install python3 python3-tk",
         "  Alpine:        sudo apk add python3 py3-tkinter",
-        "Then run ./run.sh again.",
+        "Then run python3 robo_prober.py again.",
     ]
 
 
@@ -75,7 +83,7 @@ def tk_fix():
     if WINDOWS:
         return [
             "Re-run the Python installer from https://www.python.org/downloads/windows/",
-            'choose "Modify" and tick "tcl/tk and IDLE". Then run run.bat again.',
+            'choose "Modify" and tick "tcl/tk and IDLE". Then run python robo_prober.py again.',
         ]
     if SYSTEM == "Darwin":
         return [
@@ -130,9 +138,27 @@ def check_tk(args):
             )
 
 
+ASSUME_YES = False
+
+
+def confirm(what):
+    """Ask before installing. Yes by default; non-interactive runs and -y skip the question."""
+    if ASSUME_YES or not sys.stdin.isatty():
+        say("%s (auto-yes)." % what)
+        return
+    try:
+        answer = input("[%s] %s Install now? [Y/n] " % (APP, what)).strip().lower()
+    except EOFError:
+        answer = ""
+    if answer not in ("", "y", "yes"):
+        say("Nothing installed. Run %s again when you're ready." % RUN)
+        sys.exit(0)
+
+
 def ensure_venv():
     if os.path.isfile(VPY) and quiet_ok([VPY, "-c", "import sys"]):
         return
+    confirm("robo-prober needs its Python libraries (pyserial, Pillow, esptool) in a private .venv.")
     say("First run: creating a private Python environment in .venv (one time only)...")
     shutil.rmtree(VENV, ignore_errors=True)
     if subprocess.call([sys.executable, "-m", "venv", VENV]) != 0 or not os.path.isfile(VPY):
@@ -161,9 +187,11 @@ def ensure_installed():
             have = handle.read().strip()
     except OSError:
         have = ""
-    if want == have and quiet_ok([VPY, "-c", IMPORTS]):
-        say("Everything is already installed.")
+    if want == have and quiet_ok([VPY, "-P", "-c", IMPORTS]):
+        say("All dependencies present. Good to go.")
         return
+    if have:
+        confirm("robo-prober's libraries need updating.")
     say("Installing %s (extras: %s). This needs internet once." % (APP, EXTRAS))
     pip = [VPY, "-m", "pip", "install", "--disable-pip-version-check", "--quiet", "--upgrade"]
     if subprocess.call(pip + ["pip"]) != 0:
@@ -175,21 +203,22 @@ def ensure_installed():
             "Check your internet connection and run %s again." % RUN,
             "To start over completely, delete the .venv folder.",
         )
-    if subprocess.call([VPY, "-c", IMPORTS]) != 0:
+    if subprocess.call([VPY, "-P", "-c", IMPORTS]) != 0:
         raise Problem(
             "robo-prober installed but does not import (see the error above).",
             "Delete the .venv folder and run %s again." % RUN,
         )
     with open(STAMP, "w", encoding="utf-8") as handle:
         handle.write(want + "\n")
-    say("Install complete.")
+    say("Install complete. Good to go.")
 
 
 def launch(args):
     if not args:
         say("Opening the range-of-motion window...")
         args = ["rom-gui"]
-    cmd = [VPY, "-m", MODULE] + args
+    # -P: never import from the current folder, so robo_prober.py here can't shadow the package.
+    cmd = [VPY, "-P", "-m", MODULE] + args
     if not WINDOWS:
         os.execv(VPY, cmd)
     code = subprocess.call(cmd)
@@ -200,6 +229,9 @@ def launch(args):
 
 
 def main(args):
+    global ASSUME_YES
+    if args[:1] in (["-y"], ["--yes"]):
+        ASSUME_YES, args = True, args[1:]
     try:
         check_python()
         check_tk(args)

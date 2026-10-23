@@ -35,10 +35,10 @@ jobs:
         run: sudo apt-get update && sudo apt-get install -y xvfb
       - name: Tests (Linux, under Xvfb so the GUI smoke test runs)
         if: runner.os == 'Linux'
-        run: xvfb-run -a python -m pytest -v
+        run: xvfb-run -a pytest -v
       - name: Tests
         if: runner.os != 'Linux'
-        run: python -m pytest -v
+        run: pytest -v
 
   firmware:
     name: firmware build (PlatformIO)
@@ -74,19 +74,11 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
-      - name: run.sh from a fresh clone (twice; second run must skip the install)
-        if: runner.os != 'Windows'
+      - name: python robo_prober.py from a fresh clone (twice; second run must say good to go)
+        shell: bash
         run: |
-          ./run.sh doctor
-          ./run.sh doctor 2> second.txt
-          grep -q "already installed" second.txt
-          ./run.sh run-demo --out launcher-demo.json
-      - name: run.bat from a fresh clone (twice; second run must skip the install)
-        if: runner.os == 'Windows'
-        shell: cmd
-        run: |
-          call run.bat doctor < NUL || exit /b 1
-          call run.bat doctor < NUL > second.txt 2>&1 || exit /b 1
-          type second.txt
-          findstr /c:"already installed" second.txt || exit /b 1
-          call run.bat run-demo --out launcher-demo.json < NUL || exit /b 1
+          python robo_prober.py doctor < /dev/null
+          python robo_prober.py doctor < /dev/null 2> second.txt
+          cat second.txt
+          grep -q "Good to go" second.txt
+          python robo_prober.py run-demo --out launcher-demo.json < /dev/null

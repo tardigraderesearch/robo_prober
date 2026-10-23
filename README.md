@@ -1,5 +1,10 @@
 # robo-prober
 
+**To use:** `cd robo_prober`, then run `python robo_prober.py`
+
+It checks what it needs, asks before installing anything (Y/n), or says it's good to go
+and starts. Linux, Windows and macOS. (`python3` on systems without a `python` command.)
+
 Find the robot controller on your USB bus, probe its servos only within limits
 you've approved, find each servo's safe range of motion by hand, and export
 what you learned as a validated hardware map or URDF.
@@ -56,19 +61,14 @@ This is software. Keep a hand on the power cutoff the first time anything moves.
 
 ### 1. Install
 
-Easiest: download or clone the repository and start the launcher. It finds
-Python 3.11+ and hands over to `launcher.py` (standard library only, the same
-on every OS), which makes a private `.venv` next to itself, installs robo-prober into
-it (again only when something changed) and opens the range-of-motion window.
-Any robo-prober command can follow it.
+Clone or download the repository, then `python robo_prober.py`. On the first run it
+asks before creating a private `.venv` next to itself and installing the libraries into
+it (nothing system-wide); after that it says it's good to go and opens the
+range-of-motion window. Any robo-prober command can follow it, e.g.
+`python robo_prober.py doctor` or `python robo_prober.py run-demo --out demo-map.json`.
+`-y` skips the question.
 
-| System | Start it with |
-| --- | --- |
-| Windows | double-click `run.bat` (or `run.bat run-demo --out demo-map.json`) |
-| macOS | double-click `run.command`, or `./run.sh` in Terminal |
-| Linux | `./run.sh` |
-
-`ROBO_PROBER_EXTRAS=all` makes the launcher also install the camera and
+`ROBO_PROBER_EXTRAS=all` makes it also install the camera and
 scan-to-URDF extras. With pip or pipx instead:
 
 ```bash
@@ -293,7 +293,7 @@ Platform notes:
   (exercising the serial stack) and in-process on Windows. The pseudo-terminal
   tests are skipped on Windows; everything else runs everywhere.
 - The ROM window needs Tk. It ships with the python.org installers for Windows
-  and macOS; on Linux install your distribution's `python3-tk` (the launcher
+  and macOS; on Linux install your distribution's `python3-tk` (robo_prober.py
   tells you the exact command).
 - On Linux your user needs access to the serial device (often the `dialout`
   or `uucp` group).
