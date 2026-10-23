@@ -13,14 +13,16 @@ lives in find.py, rom.py and api.py; this file only wires widgets to them.
 """
 from __future__ import annotations
 
+import queue
+import threading
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any, Callable
 
-from . import __version__, find, theme
+from . import __version__, find, flasher, theme
 from .api import EMULATOR_PORT, Controller, connect, discover, load_map, save_map
-from .transport import ProtocolError
+from .transport import FirmwareOutdated, ProtocolError
 from .rom import (
     ABS_MAX_US,
     ABS_MIN_US,
@@ -52,12 +54,31 @@ class RomApp:
     def __init__(self, root: tk.Tk, *, map_path: Path | None = None, out_path: Path | None = None,
                  port: str | None = None, channels: list[int] | None = None, operator: str = "",
                  band_half_us: int = DEFAULT_BAND_HALF_US, host_slew_us_s: int = DEFAULT_HOST_SLEW_US_S,
-                 connect_fn: Callable[..., Controller] = connect, run_timer: bool = True):
+                 connect_fn: Callable[..., Controller] = connect, run_timer: bool = True,
+                 firmware_check_fn: Callable[[str], flasher.FirmwareStatus] | None = None,
+                 install_fn: Callable[..., flasher.InstallResult] | None = None,
+                 restore_fn: Callable[..., Any] | None = None,
+                 identify_fn: Callable[[str], flasher.ChipInfo] | None = None,
+                 backup_dir: Path | None = None, run_async: bool = True):
         self.root = root
         root.title(f"robo-prober {__version__}")
         root.minsize(560, 420)
         root.geometry("1000x800")
         self.connect_fn = connect_fn
+        # Firmware: never rely on what is on the board. A real serial port is
+        # checked with HELLO first; anything else gets the backup-and-install offer.
+        real = connect_fn is connect
+        self.firmware_check_fn = firmware_check_fn or (flasher.check_firmware if real else None)
+        self.install_fn = install_fn or flasher.install
+        self.restore_fn = restore_fn or flasher.restore
+        self.identify_fn = identify_fn or flasher.identify
+        self.backup_dir = Path(backup_dir) if backup_dir else flasher.BACKUP_DIR
+        self.run_async = run_async
+        self.verified_ports: set[str] = set()
+        self.flashing = False
+        self._just_installed: str | None = None
+        self._jobs: queue.Queue = queue.Queue()
+        self.ask_fn: Callable[[str, str, list[str]], str | None] = self._ask
         self.band_half_us = band_half_us
         self.host_slew_us_s = host_slew_us_s
         self.selected_channels = channels
@@ -75,6 +96,7 @@ class RomApp:
         self.survey: find.Survey | None = None
         self.found: dict[str, find.Found] = {}
         self.skipped: set[str] = set()
+        self.focus_key: str | None = None  # a target picked by Back or from a table (redo it)
         self.pressed: set[int] = set()
         self.wiggle: find.Wiggle | None = None
         self.last_action = ""
@@ -138,6 +160,11 @@ class RomApp:
         self.port_box = ttk.Combobox(top, textvariable=self.port_var, width=30)
         self.port_box.grid(row=0, column=1, sticky="ew", padx=(6, 4))
         ttk.Button(top, text="Refresh", command=self.refresh_ports).grid(row=0, column=2, padx=(0, 12))
+        self.restore_btn = ttk.Button(top, text="Restore original firmware", command=self.restore_firmware)
+        self.restore_btn.grid(row=1, column=2, sticky="e", padx=(0, 12), pady=(6, 0))
+        self.flash_bar = ttk.Progressbar(top, mode="determinate", maximum=100)
+        self.flash_bar.grid(row=3, column=0, columnspan=3, sticky="ew", pady=(6, 0))
+        self.flash_bar.grid_remove()
         ttk.Checkbutton(top, text="Physical power cutoff is within reach",
                         variable=self.cutoff_var).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
         buttons = ttk.Frame(top)
@@ -240,8 +267,9 @@ class RomApp:
         self.wiggle_btn = ttk.Button(actions, text="Wiggle as servo", style="Accent.TButton", command=self.do_wiggle)
         self.blink_btn = ttk.Button(actions, text="Blink", command=self.do_blink)
         self.skip_btn = ttk.Button(actions, text="Skip", command=self.skip_target)
+        self.back_btn = ttk.Button(actions, text="Back", command=self.back_target)
         self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop_identify)
-        for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.stop_btn):
+        for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn):
             widget.pack(side="left", padx=(0, 6))
 
         self.answer_row = ttk.Frame(tab)
@@ -263,6 +291,10 @@ class RomApp:
             self.found_table.heading(column, text=title, anchor="w")
             self.found_table.column(column, width=width, anchor="w", stretch=column == "name")
         self.found_table.grid(row=5, column=0, sticky="nsew", pady=(10, 0))
+        # click (or double-click) a row: jump to that pin and redo it (Discover's table: double-click)
+        self.found_table.bind("<ButtonRelease-1>", lambda e: self._table_clicked(self.found_table, e))
+        for table in (self.found_table, self.pin_table):
+            table.bind("<Double-1>", lambda e, t=table: self._table_clicked(t, e))
         bottom = ttk.Frame(tab)
         bottom.grid(row=6, column=0, sticky="w", pady=(8, 0))
         self.save_map_btn = ttk.Button(bottom, text="Save hardware map", command=self.save_found_map)
@@ -458,11 +490,192 @@ class RomApp:
             return None
         return EMULATOR_PORT if port == EMULATOR_LABEL else port
 
+    # ------------------------------------------------------------ firmware
+    def _ask(self, title: str, text: str, choices: list[str]) -> str | None:
+        """A plain dialog with one button per choice; returns the choice or None."""
+        result: dict[str, str | None] = {"choice": None}
+        dialog = tk.Toplevel(self.root)
+        dialog.title(title)
+        dialog.transient(self.root)
+        frame = ttk.Frame(dialog, padding=16)
+        frame.pack(fill="both", expand=True)
+        ttk.Label(frame, text=text, wraplength=520, justify="left").pack(anchor="w")
+        row = ttk.Frame(frame)
+        row.pack(anchor="e", pady=(14, 0))
+        for index, choice in enumerate(choices):
+            def pick(c=choice):
+                result["choice"] = None if c == "Cancel" else c
+                dialog.destroy()
+            ttk.Button(row, text=choice, style="Accent.TButton" if index == 0 else "TButton",
+                       command=pick).pack(side="left", padx=(6, 0))
+        dialog.protocol("WM_DELETE_WINDOW", dialog.destroy)
+        dialog.grab_set()
+        self.root.wait_window(dialog)
+        return result["choice"]
+
+    def _run_job(self, work: Callable[[Callable[[str, int, int], None]], Any],
+                 done: Callable[[Any], None], failed: Callable[[Exception], None]) -> None:
+        """Run a flashing job off the Tk thread; progress and results come back via a queue."""
+        self.flashing = True
+        self.flash_bar.grid()
+        self.flash_bar["value"] = 0
+
+        def progress(stage: str, current: int, total: int) -> None:
+            self._jobs.put(("progress", stage, current, total))
+
+        def worker() -> None:
+            try:
+                self._jobs.put(("done", work(progress)))
+            except Exception as error:  # noqa: BLE001 - shown to the operator
+                self._jobs.put(("failed", error))
+
+        self._job_handlers = (done, failed)
+        if self.run_async:
+            threading.Thread(target=worker, daemon=True).start()
+            self.root.after(100, self._poll_jobs)
+        else:
+            worker()
+            self._poll_jobs()
+
+    def _poll_jobs(self) -> None:
+        while True:
+            try:
+                item = self._jobs.get_nowait()
+            except queue.Empty:
+                break
+            if item[0] == "progress":
+                _, stage, current, total = item
+                pct = int(100 * current / total) if total else 0
+                self.flash_bar["value"] = pct
+                self._say(f"{stage}... {pct}%" if total > 1 else f"{stage}...")
+                continue
+            self.flashing = False
+            self.flash_bar.grid_remove()
+            done, failed = self._job_handlers
+            if item[0] == "done":
+                done(item[1])
+            else:
+                failed(item[1])
+            return
+        if self.flashing and self.run_async and not self._closed:
+            self.root.after(100, self._poll_jobs)
+
+    def _firmware_ready(self, port: str) -> bool:
+        """True when the board on ``port`` runs current robo-prober firmware (or needs none)."""
+        if port == EMULATOR_PORT or port in self.verified_ports or self.firmware_check_fn is None:
+            return True
+        self._say(f"Checking the firmware on {port} (HELLO, nothing moves)...")
+        self.root.update_idletasks()
+        status = self.firmware_check_fn(port)
+        if not status.needs_install:
+            self.verified_ports.add(port)
+            if status.state == "sbc":
+                self._say(status.message)
+            return True
+        self.offer_install(port, status)
+        return False
+
+    def offer_install(self, port: str, status: flasher.FirmwareStatus | None = None) -> None:
+        """Ask once; only the explicit click backs up and flashes. Then continue to Discover."""
+        if self.flashing:
+            return
+        if self.armed:
+            self._say("Disarm before installing firmware.", error=True)
+            return
+        lead = status.message if status is not None else "This board isn't running current robo-prober firmware."
+        if "isn't running robo-prober" not in lead:
+            lead += " It needs the current robo-prober firmware."
+        text = (f"{lead} Back up everything on it to {self.backup_dir} and install the robo-prober test "
+                "firmware? Unplug servo power first.\n\nThe backup reads the whole flash (about 100 s for 8 MB); "
+                "'Restore original firmware' writes it back later.")
+        if self.ask_fn("Install robo-prober firmware", text, ["Back up and install", "Cancel"]) != "Back up and install":
+            self._say("Nothing was flashed. robo-prober needs its own firmware on the board to continue.")
+            return
+        self._drop_connection()
+
+        def work(progress):
+            return self.install_fn(port, out_dir=self.backup_dir, progress=progress, force=True)
+
+        def done(result: flasher.InstallResult) -> None:
+            self.verified_ports.add(port)
+            self._say(result.message + " Continuing to Discover.")
+            self.steps.select(0)
+            self._just_installed = port
+            try:
+                self.discover()
+            finally:
+                self._just_installed = None
+
+        def failed(error: Exception) -> None:
+            self._say(f"Firmware install stopped: {error}", error=True)
+
+        self._run_job(work, done, failed)
+
+    def restore_firmware(self) -> None:
+        if self.flashing:
+            return
+        port = self._port()
+        if port is None:
+            return
+        if port == EMULATOR_PORT:
+            self._say("The built-in emulator has no firmware to restore.", error=True)
+            return
+        if self.armed:
+            self._say("Disarm before restoring firmware.", error=True)
+            return
+        self._drop_connection()
+        try:
+            info = self.identify_fn(port)
+        except Exception as error:  # noqa: BLE001 - shown to the operator
+            self._say(f"Could not identify the board on {port}: {error}", error=True)
+            return
+        path = flasher.newest_backup(info.mac, self.backup_dir)
+        while True:
+            if path is None:
+                text = (f"No backup for this board ({info.name}, {info.mac}) in {self.backup_dir}. "
+                        "Choose a backup file?")
+                choice = self.ask_fn("Restore original firmware", text, ["Choose a file...", "Cancel"])
+            else:
+                text = (f"Write {path} back to this board ({info.name}, {info.mac})? This replaces the "
+                        "robo-prober firmware with the original. Unplug servo power first.")
+                choice = self.ask_fn("Restore original firmware", text, ["Restore", "Choose a file...", "Cancel"])
+            if choice == "Choose a file...":
+                picked = filedialog.askopenfilename(title="Backup to restore", initialdir=str(self.backup_dir),
+                                                    filetypes=[("Flash backup", "*.bin"), ("All files", "*")])
+                path = Path(picked) if picked else path
+                continue
+            if choice != "Restore":
+                self._say("Nothing was restored.")
+                return
+            break
+
+        def work(progress):
+            return self.restore_fn(port, path, progress=progress)
+
+        def done(_result) -> None:
+            self.verified_ports.discard(port)
+            self._say(f"Restored the original firmware from {path.name}. robo-prober will offer to "
+                      "install its own firmware again on the next Connect.")
+
+        def failed(error: Exception) -> None:
+            self._say(f"Restore stopped: {error}", error=True)
+
+        self._run_job(work, done, failed)
+
     def _ensure_connected(self) -> bool:
         if self.controller is not None:
             return True
+        if self.flashing:
+            self._say("Wait for the firmware job to finish.", error=True)
+            return False
         port = self._port()
         if port is None:
+            return False
+        try:
+            if not self._firmware_ready(port):
+                return False
+        except Exception as error:  # noqa: BLE001 - shown to the operator
+            self._say(f"Could not check the firmware: {error}", error=True)
             return False
         try:
             self.controller = self.connect_fn(port)
@@ -506,6 +719,17 @@ class RomApp:
             return
         try:
             self.survey = find.discover(self.controller)
+        except FirmwareOutdated as error:
+            # robo-prober firmware, but older: same offer as foreign firmware, not an error
+            port = self._port()
+            if port == self._just_installed:
+                self._say(f"The new firmware still reports: {error}", error=True)
+                return
+            self.verified_ports.discard(port)
+            self._drop_connection()
+            self.offer_install(port, flasher.FirmwareStatus(
+                "outdated", f"This board runs older robo-prober firmware ({error})."))
+            return
         except Exception as error:  # noqa: BLE001
             self._say(f"Discover failed: {error}", error=True)
             return
@@ -579,8 +803,51 @@ class RomApp:
         return buttons + [t for t in find.targets(self.survey) if t.pin not in self.pressed]
 
     def current_target(self) -> find.Target | None:
-        return next((t for t in self._identify_targets() if t.key not in self.found and t.key not in self.skipped),
-                    None)
+        targets = self._identify_targets()
+        if self.focus_key is not None:
+            focused = next((t for t in targets if t.key == self.focus_key), None)
+            if focused is not None:
+                return focused
+            self.focus_key = None
+        return next((t for t in targets if t.key not in self.found and t.key not in self.skipped), None)
+
+    def jump_to(self, key: str) -> bool:
+        """Make ``key`` the current target; answering it again replaces its old result."""
+        if self.wiggle is not None:
+            self._say("Wait for the wiggle to finish (or press Stop).", error=True)
+            return False
+        if not any(t.key == key for t in self._identify_targets()):
+            self._say(f"{key} is not offered for identifying (driven, reserved or a bus pin).", error=True)
+            return False
+        self.focus_key = key
+        self.skipped.discard(key)
+        self.last_action = ""
+        self.pending_kind = ""
+        self.name_var.set("")
+        self.steps.select(1)
+        self._refresh_identify()
+        old = self.found.get(key)
+        self._say(f"Redo {key}" + (f" (was: {old.kind}{' ' + old.name if old.name else ''})." if old else "."))
+        return True
+
+    def back_target(self) -> None:
+        """Go to the target before the current one (in walk order)."""
+        targets = self._identify_targets()
+        current = self.current_target()
+        index = len(targets) if current is None else next(i for i, t in enumerate(targets) if t.key == current.key)
+        if index == 0:
+            self._say("This is the first pin.", error=True)
+            return
+        self.jump_to(targets[index - 1].key)
+
+    def _table_clicked(self, table: ttk.Treeview, event: Any = None) -> None:
+        row = table.identify_row(event.y) if event is not None else ""
+        row = row or (table.selection() or ("",))[0]
+        if not row:
+            return
+        key = str(table.item(row, "values")[0])
+        if key.startswith(("GPIO ", "PCA9685 ch ")):
+            self.jump_to(key)
 
     def _wiggle_values(self) -> tuple[int, int] | None:
         try:
@@ -607,6 +874,9 @@ class RomApp:
         self.wiggle_btn.state(["!disabled"] if can_probe else ["disabled"])
         self.blink_btn.state(["!disabled"] if can_probe and target.pin is not None else ["disabled"])
         self.skip_btn.state(["!disabled"] if target is not None and not busy else ["disabled"])
+        first = self._identify_targets()[:1]
+        at_first = target is not None and first and first[0].key == target.key
+        self.back_btn.state(["!disabled"] if first and not at_first and not busy else ["disabled"])
         self.stop_btn.state(["!disabled"] if target is not None else ["disabled"])
         asking = self.last_action and not busy and not self.pending_kind
         if asking:
@@ -722,10 +992,12 @@ class RomApp:
     def skip_target(self) -> None:
         target = self.current_target()
         if target is not None and self.wiggle is None:
-            self.skipped.add(target.key)
+            if target.key not in self.found:  # skipping a redo keeps its old result
+                self.skipped.add(target.key)
             self._next_target()
 
     def _next_target(self) -> None:
+        self.focus_key = None
         self.last_action = ""
         self.pending_kind = ""
         self.name_var.set("")
@@ -743,6 +1015,7 @@ class RomApp:
             except Exception as error:  # noqa: BLE001
                 self._say(f"STOP not confirmed ({error}). CUT POWER NOW.", error=True)
                 self._drop_connection()
+        self.focus_key = None
         target = self.current_target()
         while target is not None:
             self.skipped.add(target.key)

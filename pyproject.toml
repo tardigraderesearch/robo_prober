@@ -70,7 +70,7 @@ robo-prober = "robo_prober.cli:main"
 where = ["src"]
 
 [tool.setuptools.package-data]
-robo_prober = ["data/*.json"]
+robo_prober = ["data/*.json", "firmware/*.bin", "firmware/manifest.json"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

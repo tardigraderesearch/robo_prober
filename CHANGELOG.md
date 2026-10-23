@@ -7,6 +7,17 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Firmware backup and install: on Connect, a board not running the current
+  robo-prober firmware (foreign, or older robo-prober without the needed caps)
+  gets one confirmation, then its whole flash is backed up to
+  `~/robo_prober_backups/` and the prebuilt test firmware for its chip is
+  installed and verified. "Restore original firmware" (GUI) and
+  `firmware backup|install|restore` (CLI) write a backup back, MAC-checked.
+  Prebuilt images for ESP32/-S2/-S3/-C3/-C6 ship in the package
+  (`python -m robo_prober.firmware_build` rebuilds them).
+- Identify step: a Back button, and clicking a row in the Pin / channel table
+  (or double-clicking one in Discover) jumps to that pin to redo it. The
+  default wiggle is now +/-150 us (60 us was too small to see).
 - Find servos without knowing the wiring. The window opens on **1. Discover**
   (read-only pin survey, the PCA9685 found at boot, I2C devices, a button
   watch), then **2. Identify** (one pin or PCA9685 channel at a time: wiggle as

@@ -297,6 +297,84 @@ def cmd_estop(args: argparse.Namespace) -> int:
     return 0
 
 
+def _firmware_port(args: argparse.Namespace) -> str:
+    if args.port:
+        return args.port
+    found = [port for port in discover_serial_ports() if not is_placeholder_port(port)]
+    ports = [row["device"] for row in annotate_devices(found)]
+    if len(ports) != 1:
+        raise SystemExit("pick a port with --port (found: " + (", ".join(ports) or "none") + ")")
+    return ports[0]
+
+
+def _confirm(question: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    try:
+        answer = input(question + " [y/N] ").strip().lower()
+    except EOFError:
+        answer = ""
+    return answer in ("y", "yes")
+
+
+def _cli_progress():
+    state = {"stage": None}
+
+    def progress(stage: str, done: int, total: int) -> None:
+        if stage != state["stage"]:
+            if state["stage"] is not None:
+                print(file=sys.stderr)
+            state["stage"] = stage
+        pct = int(100 * done / total) if total else 0
+        print(f"\r{stage}: {pct}%", end="", file=sys.stderr, flush=True)
+
+    return progress
+
+
+def cmd_firmware(args: argparse.Namespace) -> int:
+    from . import flasher
+
+    port = _firmware_port(args)
+    progress = _cli_progress()
+    out_dir = Path(args.backup_dir) if args.backup_dir else flasher.BACKUP_DIR
+    if args.action == "backup":
+        if not _confirm(f"Read the whole flash of the board on {port} into {out_dir}? "
+                        "It resets the board; nothing is written to it.", args.yes):
+            print("Nothing done.")
+            return 1
+        path = flasher.backup(port, out_dir, progress=progress)
+        print(f"\nBacked up to {path}")
+        return 0
+    if args.action == "install":
+        status = flasher.check_firmware(port)
+        if status.state == "sbc" or (status.state == "current" and not args.force):
+            print(status.message)
+            return 0
+        print(status.message)
+        if not _confirm(f"Back up everything on it to {out_dir} and install the robo-prober test firmware? "
+                        "Unplug servo power first.", args.yes):
+            print("Nothing done.")
+            return 1
+        # Already checked above, so install does not skip; it still refuses on a failed backup.
+        result = flasher.install(port, out_dir=out_dir, progress=progress, force=True)
+        print("\n" + result.message)
+        return 0
+    # restore
+    backup_path = Path(args.backup) if args.backup else None
+    if backup_path is None:
+        info = flasher.identify(port)
+        backup_path = flasher.newest_backup(info.mac, out_dir)
+        if backup_path is None:
+            raise SystemExit(f"no backup for {info.mac} in {out_dir}; pass --backup FILE")
+    if not _confirm(f"Write {backup_path} back to the board on {port}? This replaces the robo-prober "
+                    "firmware with the original. Unplug servo power first.", args.yes):
+        print("Nothing done.")
+        return 1
+    info = flasher.restore(port, backup_path, progress=progress)
+    print(f"\nRestored {backup_path.name} to {info.name} ({info.mac}).")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="robo-prober",
@@ -391,6 +469,15 @@ def build_parser() -> argparse.ArgumentParser:
     validate_map = sub.add_parser("validate-map", help="Validate and reload an exported hardware map")
     validate_map.add_argument("map", type=Path)
     validate_map.set_defaults(func=cmd_validate_map)
+
+    firmware = sub.add_parser("firmware", help="Back up the board, install the robo-prober test firmware, or restore")
+    firmware.add_argument("action", choices=["backup", "install", "restore"])
+    firmware.add_argument("--port", help="Serial port (default: the only one connected)")
+    firmware.add_argument("--backup", help="restore: backup .bin to write (default: newest for this board's MAC)")
+    firmware.add_argument("--backup-dir", help="Where backups live (default: ~/robo_prober_backups)")
+    firmware.add_argument("--force", action="store_true", help="install even if the current firmware answers")
+    firmware.add_argument("-y", "--yes", action="store_true", help="Do not ask for confirmation")
+    firmware.set_defaults(func=cmd_firmware)
 
     from .sensing_cli import register
     register(sub)

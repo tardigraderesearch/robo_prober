@@ -31,8 +31,8 @@ from .transport import ProtocolError
 
 GPIO_BASE = 100
 DEFAULT_START_US = 1500
-DEFAULT_DELTA_US = 60
-DEFAULT_WIGGLE_SLEW_US_S = 120     # "slowly": a 60 us step takes half a second
+DEFAULT_DELTA_US = 150            # ~13 degrees: big enough to see on a real arm (60 us was too small)
+DEFAULT_WIGGLE_SLEW_US_S = 120     # "slowly": a 150 us step takes about 1.25 s
 BLINK_COUNT = 3
 MAX_I2C_PAIRS = 30
 DRIVEN = ("driven_high", "driven_low")

@@ -102,6 +102,9 @@ robo-prober rom-gui --emulator --map demo-map.json --operator you
 
 ### 3. Flash the firmware to an ESP32
 
+You don't need PlatformIO: the window and `python robo_prober.py firmware install`
+back up the board and install the prebuilt firmware for you (see
+[Firmware: backup and install](#firmware-backup-and-install)). To build it yourself:
 `firmware/esp32_robo_prober/` is a PlatformIO (and Arduino IDE) project for the
 ESP32 family (ESP32, -S2, -S3, -C3, -C6). Servos can be on a PCA9685 board (found
 at boot on whatever pins it's wired to) or straight on GPIO pins. Its
@@ -161,6 +164,34 @@ robo-prober rom-gui --port /dev/ttyUSB0 --map my-robot.map.json --operator you
 
 See [Range of motion](#range-of-motion) below.
 
+## Firmware: backup and install
+
+robo-prober never relies on the firmware already on a board. On Connect (Discover or
+Connect & arm) it says HELLO; if the board doesn't answer as the current robo-prober
+firmware (version and capabilities), it asks once:
+
+> This board isn't running robo-prober. Back up everything on it to
+> ~/robo_prober_backups and install the robo-prober test firmware? Unplug servo power first.
+
+**Back up and install** identifies the chip with esptool (type, MAC, flash size), reads
+the **whole flash** to `~/robo_prober_backups/<chip>-<mac>-<date>.bin` plus a `.json`
+(chip, MAC, size, sha256, date), writes the prebuilt image for that chip at 0x0,
+verifies it, and checks HELLO again before continuing to Discover. A failed or
+short backup stops before anything is written; backups are never overwritten.
+Nothing is flashed without that click. **Restore original firmware** writes the
+newest backup for that board's MAC back (or one you pick), only to the board with the
+same MAC.
+
+```bash
+python robo_prober.py firmware backup  [--port P]
+python robo_prober.py firmware install [--port P] [-y]
+python robo_prober.py firmware restore [--port P] [--backup FILE] [-y]
+```
+
+Raspberry Pi and Jetson boards are never flashed; they run `python -m robo_prober.sbc`.
+Maintainers rebuild the images in `src/robo_prober/firmware/` with
+`python -m robo_prober.firmware_build` (needs PlatformIO).
+
 ## Find servos
 
 `python robo_prober.py` opens the window on step 1. You don't need to know the
@@ -175,7 +206,7 @@ wiring.
    pulled-up pins. Tick **Watch buttons** and press each button: the pins that
    change are listed.
 2. **Identify** (after Connect & arm). One pin (or PCA9685 channel) at a time:
-   "GPIO 4: it will go to 1500 µs, then wiggle ±60 µs slowly. Make sure it's
+   "GPIO 4: it will go to 1500 µs, then wiggle ±150 µs slowly. Make sure it's
    clear." Press **Wiggle as servo** or **Blink** (LEDs, buzzers), then say what
    happened (**Servo moved**, **Light / sound**, **Nothing**, **Try again**) and
    name it ("shoulder"). Floating pins come first, then pulled ones, then PCA9685

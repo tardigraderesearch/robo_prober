@@ -17,6 +17,10 @@ class TransportTimeout(ProtocolError):
     pass
 
 
+class FirmwareOutdated(ProtocolError):
+    """The controller speaks ROBOPROBE/1 but lacks a capability this host needs."""
+
+
 OK_RE = re.compile(r"^RP1 OK(?: (?P<fields>.*))?$")
 ERR_RE = re.compile(r"^RP1 ERR(?: (?P<fields>.*))?$")
 FIELD_RE = re.compile(r"([a-zA-Z_][a-zA-Z0-9_]*)=([^ ]+)")
@@ -145,9 +149,10 @@ class SerialProtocolTransport:
     def require_caps(self, *names: str) -> None:
         missing = [name for name in names if name not in self.caps]
         if missing:
-            raise ProtocolError(
+            raise FirmwareOutdated(
                 "controller firmware does not support " + ", ".join(missing)
-                + " (HELLO caps); flash the v0.2 firmware"
+                + " (HELLO caps); install the current robo-prober test firmware"
+                " (python robo_prober.py firmware install)"
             )
 
     def hello(self) -> dict[str, str]:
