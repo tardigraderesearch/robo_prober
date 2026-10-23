@@ -267,7 +267,8 @@ try:
     from . import catalog_sbc as _sbc
 except ImportError:
     _sbc = None
-_SBC_PROFILES = getattr(_sbc, 'SBC_PROFILES', None) or getattr(_sbc, 'BOARD_PROFILES', None) or {}
+_SBC_PROFILES = (getattr(_sbc, 'BOARD_PROFILES_SBC', None) or getattr(_sbc, 'SBC_PROFILES', None)
+                 or getattr(_sbc, 'BOARD_PROFILES', None) or {})
 for _board_id, _sbc_profile in _SBC_PROFILES.items():
     BOARD_PROFILES.setdefault(_board_id, _sbc_profile)
 

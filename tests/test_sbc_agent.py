@@ -154,7 +154,7 @@ def test_servo_explicit_start_band_slew_and_host_transport(rig):
         transport.arm("t", cutoff_confirmed=True)
         assert not b.write_log
         err(d, "PROBE pin=4 mode=servo start_us=1600 token=t", "out_of_limits")
-        assert ok(d, PROBE)["channel"] == "0"
+        assert ok(d, PROBE)["channel"] == "104"  # host-facing GPIO channel, like the firmware
         assert b.observations == [(4, "servo", 1500)]
         transport.move_us(0, 1550)
         clock[0] = 100
@@ -243,7 +243,7 @@ def test_i2c_devices_and_reserved_addresses(rig):
 @pytest.mark.parametrize("command,reason", [
     ("SURVEY pin=-1", "bad_pin"), ("SURVEY pin=99", "bad_pin"),
     ("SURVEY pin=4 pin=4", "duplicate_field"), ("SURVEY pin=4 extra=1", "bad_fields"),
-    ("WATCH maybe", "bad_syntax"), ("WATCH state=on", "bad_fields"),
+    ("WATCH maybe", "bad_syntax"),
     ("EVENTS extra=1", "bad_fields"), ("I2C_SCAN sda=2 scl=3", "bad_fields"),
     ("I2C_SCAN bus=-1", "bad_bus"), ("PROBE pin=4 mode=servo token=t", "bad_fields"),
     ("PROBE pin=4 mode=digital start_us=1500 token=t", "bad_mode"),

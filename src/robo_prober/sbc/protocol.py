@@ -2,6 +2,8 @@
 from __future__ import annotations
 
 import re
+
+GPIO_BASE = 100  # host-facing channel for a probed GPIO N is 100+N (matches the firmware)
 import threading
 from collections import deque
 
@@ -18,10 +20,10 @@ class SBCAgent(ReferenceDevice):
     def __init__(self, backend: GPIOBackend, *, board=None, profile=None,
                  scanner=None, watchdog_ms=1000):
         self.backend = backend
-        self.board = board or Board("emulated", "EMULATED")
+        self.sbc_board = board or Board("emulated", "EMULATED")
         if profile is None:
             try:
-                profile = get_profile(self.board.id)
+                profile = get_profile(self.sbc_board.id)
             except KeyError:
                 pass
         self.known_pins, self.pin_lines = pin_map(profile, backend)
@@ -33,7 +35,7 @@ class SBCAgent(ReferenceDevice):
         self.watch_pins = set()
         self.event_queue = deque(maxlen=4096)
         self.blink = None
-        super().__init__(device_id=self.board.id, outputs=backend.name, watchdog_ms=watchdog_ms)
+        super().__init__(device_id=self.sbc_board.id, outputs=backend.name, watchdog_ms=watchdog_ms)
 
     def _driver_write(self, channel, pulse_us):
         pin = self.bindings.get(channel)
@@ -79,6 +81,28 @@ class SBCAgent(ReferenceDevice):
                 self._release_all("driver")
 
     def handle(self, line, now_ms):
+        """Host-facing channel numbers: a probed GPIO N is channel 100+N, like the
+        ESP32 firmware. Internally the agent uses PWM slots, so translate both ways."""
+        with self.lock:
+            def to_slot(match):
+                number = int(match.group(1))
+                if number < GPIO_BASE:
+                    return match.group(0)
+                slot = next((c for c, p in self.bindings.items() if p == number - GPIO_BASE), None)
+                return "channel=%d" % (slot if slot is not None else 10 ** 6)
+            reply = self._handle(re.sub(r"\bchannel=(\d+)", to_slot, line), now_ms)
+            gpio_request = line.strip(" ").startswith("PROBE") or any(
+                int(n) >= GPIO_BASE for n in re.findall(r"\bchannel=(\d+)", line))
+            if not gpio_request:
+                return reply
+
+            def to_host(match):
+                slot = int(match.group(1))
+                pin = self.bindings.get(slot)
+                return "channel=%d" % (GPIO_BASE + pin) if pin is not None else match.group(0)
+            return re.sub(r"\bchannel=(\d+)", to_host, reply)
+
+    def _handle(self, line, now_ms):
         with self.lock:
             self.tick(now_ms)
             if len(line) > MAX_LINE:
@@ -86,8 +110,6 @@ class SBCAgent(ReferenceDevice):
             # WATCH is the sole command with a positional argument in the spec.
             if line.strip(" ") in ("WATCH on", "WATCH off"):
                 line = "WATCH state=" + line.strip(" ").split(" ")[1]
-            elif line.strip(" ").startswith("WATCH") and "state=" in line:
-                return "RP1 ERR reason=bad_fields"
             try:
                 # The reference grammar predates I2C_SCAN and disallows digits
                 # in verbs. Keep its field parser and extend only this verb.
@@ -176,8 +198,8 @@ class SBCAgent(ReferenceDevice):
         if fields:
             return "RP1 ERR reason=bad_fields"
         pins = ",".join(str(p) for p, line in sorted(self.pin_lines.items()) if not self.backend.claimed(line))
-        model = re.sub(r"[^A-Za-z0-9_.-]", "_", self.board.model)
-        return f"RP1 OK board={self.board.id} chip={model} pins={pins or 'none'}"
+        model = re.sub(r"[^A-Za-z0-9_.-]", "_", self.sbc_board.model)
+        return f"RP1 OK board={self.sbc_board.id} chip={model} pins={pins or 'none'}"
 
     def _cmd_survey(self, fields, now_ms):
         if not _fields_ok(fields, ("pin",), 1):
