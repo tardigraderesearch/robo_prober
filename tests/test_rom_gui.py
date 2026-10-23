@@ -38,7 +38,7 @@ def app(tmp_path):
 
 def drag(app, channel, value):
     """Move the slider the way a user would (through its variable)."""
-    app.rows[channel]["var"].set(value)
+    app.rows[channel]["var"].set(value - app.rows[channel]["zero"])  # the slider is relative to the start
     app.root.update()
     assert app.session.targets[channel] == value
 
@@ -83,7 +83,8 @@ def test_rom_window_end_to_end(app):
     assert str(app.rows[0]["scale"].cget("state")) == "normal"
     assert device.output(1) is None and device.output(2) is None
     scale = app.rows[0]["scale"]
-    assert (int(float(scale.cget("from"))), int(float(scale.cget("to")))) == (1220, 1820)
+    zero = app.rows[0]["zero"]
+    assert (int(float(scale.cget("from"))) + zero, int(float(scale.cget("to"))) + zero) == (1220, 1820)
 
     drag(app, 0, 1750)
     settle(app, 0, 1750)
@@ -92,7 +93,7 @@ def test_rom_window_end_to_end(app):
     settle(app, 0, 1300)
     app.mark(0, 2)
     assert app.roms[0].range == (1300, 1750)
-    assert (int(float(scale.cget("from"))), int(float(scale.cget("to")))) == (1300, 1750)
+    assert (int(float(scale.cget("from"))) + zero, int(float(scale.cget("to"))) + zero) == (1300, 1750)
     assert (device.channels[0].min_us, device.channels[0].max_us) == (1300, 1750)
 
     saved = app.save()

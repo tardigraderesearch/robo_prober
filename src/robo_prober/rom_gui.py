@@ -358,8 +358,10 @@ class RomApp:
         warning.grid(row=1, column=0, sticky="w", pady=(2, 0))
 
         low, high = rom.slider_range()
-        var = tk.DoubleVar(value=rom.center)
-        scale = tk.Scale(frame, from_=low, to=high, orient="horizontal", resolution=1, showvalue=True, variable=var,
+        zero = rom.start_us if rom.start_us is not None else rom.center
+        var = tk.DoubleVar(value=0)  # the slider reads 0 at the start position; left/right are -/+ us
+        scale = tk.Scale(frame, from_=low - zero, to=high - zero, orient="horizontal", resolution=1, showvalue=True,
+                         variable=var, label=f"us from start ({zero} us)",
                          background=theme.BG, foreground=theme.TEXT, troughcolor=theme.SURFACE_HI,
                          activebackground=theme.ACCENT, highlightthickness=0, borderwidth=0, sliderrelief="flat",
                          font=theme.FONT)
@@ -378,7 +380,7 @@ class RomApp:
         for widget in (rom1, rom2, clear, widen, narrow):
             widget.pack(side="left", padx=(0, 6))
         row = {"frame": frame, "var": var, "scale": scale, "strip": strip, "info": info, "start_var": start_var,
-               "start_entry": start_entry, "enable": enable, "warning": warning,
+               "start_entry": start_entry, "enable": enable, "warning": warning, "zero": zero,
                "rom1": rom1, "rom2": rom2, "clear": clear, "widen": widen, "narrow": narrow}
         # Bind after the row exists so the callbacks can find it.
         start_var.trace_add("write", lambda *_, ch=rom.channel: self._refresh_row(ch))
@@ -424,8 +426,9 @@ class RomApp:
             return
         row, rom = self.rows[channel], self.roms[channel]
         low, high = rom.slider_range()
-        if int(float(row["scale"].cget("from"))) != low or int(float(row["scale"].cget("to"))) != high:
-            row["scale"].configure(from_=low, to=high)
+        zero = row["zero"]
+        if int(float(row["scale"].cget("from"))) != low - zero or int(float(row["scale"].cget("to"))) != high - zero:
+            row["scale"].configure(from_=low - zero, to=high - zero)
         enabled = self._enabled(channel)
         row["scale"].configure(state="normal" if enabled else "disabled")
         row["start_entry"].state(["disabled"] if enabled else ["!disabled"])
@@ -1127,9 +1130,12 @@ class RomApp:
         except Exception as error:  # noqa: BLE001
             self._fault_or_say(error)
             return
-        self.rows[channel]["var"].set(start)
-        self._say(f"ch {channel}: output on at {start} us. Drag the slider; the servo follows slowly.")
+        row = self.rows[channel]
+        row["zero"] = start
+        row["scale"].configure(label=f"us from start ({start} us)")
         self._refresh_row(channel)
+        row["var"].set(0)
+        self._say(f"ch {channel}: output on at {start} us (slider 0). Drag the slider; the servo follows slowly.")
 
     def _var_changed(self, channel: int, var: tk.DoubleVar) -> None:
         try:
@@ -1141,7 +1147,7 @@ class RomApp:
     def slider_moved(self, channel: int, value: Any) -> None:
         if not self._enabled(channel):
             return
-        self.session.set_target(channel, float(value))
+        self.session.set_target(channel, self.rows[channel]["zero"] + float(value))
 
     def mark(self, channel: int, which: int) -> None:
         if not self._enabled(channel):
@@ -1151,7 +1157,7 @@ class RomApp:
         except Exception as error:  # noqa: BLE001
             self._fault_or_say(error)
             return
-        self.rows[channel]["var"].set(pulse)
+        self.rows[channel]["var"].set(pulse - self.rows[channel]["zero"])
         rom = self.roms[channel]
         if rom.complete:
             low, high = rom.range
