@@ -10,7 +10,7 @@ The cascade, driven by the operator (from the window or from Python):
 2. Identify, after ARM with the power cutoff confirmed: one target at a time
    (floating pins first, then resistively pulled pins, then PCA9685
    channels, boot-strapping pins last), the operator picks "wiggle as a
-   servo" (explicit start pulse, then +/-delta, slowly, inside a LIMIT band
+   servo" (explicit start pulse, then a quick +/-delta buzz, inside a LIMIT band
    around it) or "blink" (LEDs, buzzers), then says what happened and names
    it. A pin something else drives is never a target, and the firmware
    refuses it anyway (pin_driven). Every GPIO is released after its probe.
@@ -31,8 +31,9 @@ from .transport import ProtocolError
 
 GPIO_BASE = 100
 DEFAULT_START_US = 1500
-DEFAULT_DELTA_US = 150            # ~13 degrees: big enough to see on a real arm (60 us was too small)
-DEFAULT_WIGGLE_SLEW_US_S = 120     # "slowly": a 150 us step takes about 1.25 s
+DEFAULT_DELTA_US = 80             # ~7 degrees each way, buzzed quickly: easy to see or feel
+DEFAULT_WIGGLE_SLEW_US_S = 2000    # the firmware maximum: each 160 us swing takes ~80 ms
+BUZZ_CYCLES = 3                   # back-and-forth swings per wiggle (~0.6 s in all)
 BLINK_COUNT = 3
 MAX_I2C_PAIRS = 30
 DRIVEN = ("driven_high", "driven_low")
@@ -145,10 +146,11 @@ def targets(survey: Survey) -> list[Target]:
 
 
 class Wiggle:
-    """Non-blocking servo wiggle of one target: start pulse, +delta, -delta, back.
+    """Non-blocking servo buzz of one target: start pulse, then +/-delta a few times, back.
 
-    ``begin()`` sends a LIMIT band of start +/- delta at a slow slew, then the
-    explicit start pulse (PROBE for a GPIO, START for a PCA9685 channel).
+    ``begin()`` sends a LIMIT band of start +/- delta, then the
+    explicit start pulse (PROBE for a GPIO, START for a PCA9685 channel). The
+    small band keeps the fast swing safe: the firmware clamps to it.
     Call ``step()`` repeatedly (a GUI timer, or ``run()``): it waits for the
     firmware to reach each target (STATUS), feeding the watchdog meanwhile.
     A GPIO is released when the wiggle is done; a PCA9685 channel stays
@@ -175,7 +177,8 @@ class Wiggle:
         self.ctl.set_limits(ch, low, high, neutral_us=start, slew_us_s=self.slew_us_s)
         if held is None:
             self.ctl.start(ch, start)
-        self.steps = ([start] if held not in (None, start) else []) + [start + delta, start - delta, start]
+        self.steps = (([start] if held not in (None, start) else [])
+                      + [start + delta, start - delta] * BUZZ_CYCLES + [start])
 
     def step(self) -> bool:
         if self.done:

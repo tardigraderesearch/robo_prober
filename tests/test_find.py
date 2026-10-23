@@ -99,3 +99,27 @@ def test_gpio_servo_works_in_the_range_of_motion_session(setup):
     assert ctl.position(104) == 1700
     session.close()
     assert device.output(104) is None
+
+
+def test_wiggle_is_a_quick_buzz():
+    from robo_prober import find
+    from robo_prober.find import Target, Wiggle
+
+    class Ctl:
+        def __init__(self):
+            self.limits = None
+        def position(self, ch):
+            return None
+        def set_limits(self, ch, low, high, neutral_us, slew_us_s):
+            self.limits = (low, high, slew_us_s)
+        def start(self, ch, pulse):
+            pass
+
+    ctl = Ctl()
+    w = Wiggle(ctl, Target(4, cls="floating"))
+    w.begin()
+    start, d = find.DEFAULT_START_US, find.DEFAULT_DELTA_US
+    assert w.steps == [start + d, start - d] * find.BUZZ_CYCLES + [start]
+    assert ctl.limits == (start - d, start + d, 2000)  # fast, but the firmware band still clamps it
+    swing_s = sum(abs(b - a) for a, b in zip([start] + w.steps, w.steps)) / ctl.limits[2]
+    assert swing_s < 1.0

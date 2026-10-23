@@ -271,6 +271,23 @@ class RomApp:
         self.stop_btn = ttk.Button(actions, text="Stop", command=self.stop_identify)
         for widget in (self.wiggle_btn, self.blink_btn, self.skip_btn, self.back_btn, self.stop_btn):
             widget.pack(side="left", padx=(0, 6))
+        self.auto_next_var = tk.BooleanVar(value=True)
+        ttk.Checkbutton(actions, text="Buzz the next pin after No", variable=self.auto_next_var).pack(side="left", padx=(12, 0))
+        ttk.Label(actions, text="Keys: Space buzz · Y servo · L light · N no · S skip · B back",
+                  style="Muted.TLabel").pack(side="left", padx=(12, 0))
+
+        def key(action):
+            def handler(event):
+                if self.steps.index("current") != 1 or event.widget is self.name_entry:
+                    return None
+                action()
+                return "break"
+            return handler
+        for keys, action in (("<space>", self.do_wiggle), ("yY", lambda: self.answer("servo")),
+                             ("lL", lambda: self.answer("led")), ("nN", lambda: self.answer("unused")),
+                             ("sS", self.skip_target), ("bB", self.back_target)):
+            for k in ([keys] if keys.startswith("<") else list(keys)):
+                self.root.bind(k, key(action))
 
         self.answer_row = ttk.Frame(tab)
         self.answer_row.grid(row=3, column=0, sticky="w", pady=(8, 0))
@@ -867,7 +884,7 @@ class RomApp:
         elif target.cls == "button":
             text = f"{target.key} changed while you pressed buttons. What is it?"
         else:
-            text = (f"{target.key}: it will go to {start} us, then wiggle +/-{delta} us slowly. "
+            text = (f"{target.key}: it will go to {start} us, then buzz +/-{delta} us. "
                     "Make sure it's clear." + ("  (boot-strapping pin)" if target.last else ""))
         self.target_var.set(text)
         can_probe = target is not None and target.cls != "button" and self.armed and not busy
@@ -940,7 +957,7 @@ class RomApp:
             self._probe_error(error)
             return
         self.last_action = "wiggle"
-        self._say(f"{target.key}: wiggling slowly. Watch the robot.")
+        self._say(f"{target.key}: buzzing. Did it move? Y / N (L for a light).")
         self._refresh_identify()
 
     def do_blink(self) -> None:
@@ -968,6 +985,8 @@ class RomApp:
         if kind == "unused":
             self.found[target.key] = find.Found(target, "unused")
             self._next_target()
+            if self.auto_next_var.get():
+                self.root.after(150, self.do_wiggle)  # next pin buzzes right away: just keep pressing N
             return
         self.pending_kind = kind
         self.name_var.set("")

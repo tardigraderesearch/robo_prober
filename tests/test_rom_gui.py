@@ -339,7 +339,7 @@ def test_identify_back_and_table_jump_redo(tmp_path):
     root = _fw_root()
     app = RomApp(root, port="emulator", operator="gui-test", run_timer=False, host_slew_us_s=2000)
     try:
-        assert app.delta_var.get() == "150" == str(find.DEFAULT_DELTA_US)
+        assert app.delta_var.get() == "80" == str(find.DEFAULT_DELTA_US)
         app.discover()
         targets = [t.key for t in app._identify_targets()]
         assert len(targets) >= 3
