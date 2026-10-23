@@ -60,8 +60,8 @@ test = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/evilhobo1911/robo-prober"
-Issues = "https://github.com/evilhobo1911/robo-prober/issues"
+Homepage = "https://github.com/evilhobo1911/robo_prober"
+Issues = "https://github.com/evilhobo1911/robo_prober/issues"
 
 [project.scripts]
 robo-prober = "robo_prober.cli:main"

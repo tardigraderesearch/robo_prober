@@ -9,7 +9,7 @@ Find the robot controller on your USB bus, probe its servos only within limits
 you've approved, find each servo's safe range of motion by hand, and export
 what you learned as a validated hardware map or URDF.
 
-[![CI](https://github.com/evilhobo1911/robo-prober/actions/workflows/ci.yml/badge.svg)](https://github.com/evilhobo1911/robo-prober/actions/workflows/ci.yml)
+[![CI](https://github.com/evilhobo1911/robo_prober/actions/workflows/ci.yml/badge.svg)](https://github.com/evilhobo1911/robo_prober/actions/workflows/ci.yml)
 
 
 ## Hardware test status
@@ -87,9 +87,9 @@ range-of-motion window. Any robo-prober command can follow it, e.g.
 scan-to-URDF extras. With pip or pipx instead:
 
 ```bash
-pipx install "git+https://github.com/evilhobo1911/robo-prober"
+pipx install "git+https://github.com/evilhobo1911/robo_prober"
 # or, with the optional extras (camera, scan-to-URDF, esptool):
-pipx install "robo-prober[all] @ git+https://github.com/evilhobo1911/robo-prober"
+pipx install "robo-prober[all] @ git+https://github.com/evilhobo1911/robo_prober"
 ```
 
 From a clone:
