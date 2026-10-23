@@ -26,6 +26,7 @@ from . import __version__, find, flasher, theme
 from .api import EMULATOR_PORT, Controller, connect, discover, load_map, save_map
 from .transport import FirmwareOutdated, ProtocolError
 from .rom import (
+    MIN_BAND_HALF_US,
     ABS_MAX_US,
     ABS_MIN_US,
     DEFAULT_BAND_HALF_US,
@@ -373,11 +374,12 @@ class RomApp:
         rom2 = ttk.Button(actions, text="Set ROM 2", command=lambda ch=rom.channel: self.mark(ch, 2))
         clear = ttk.Button(actions, text="Clear", command=lambda ch=rom.channel: self.clear(ch))
         widen = ttk.Button(actions, text="Widen range", command=lambda ch=rom.channel: self.widen(ch))
-        for widget in (rom1, rom2, clear, widen):
+        narrow = ttk.Button(actions, text="Narrow range", command=lambda ch=rom.channel: self.narrow(ch))
+        for widget in (rom1, rom2, clear, widen, narrow):
             widget.pack(side="left", padx=(0, 6))
         row = {"frame": frame, "var": var, "scale": scale, "strip": strip, "info": info, "start_var": start_var,
                "start_entry": start_entry, "enable": enable, "warning": warning,
-               "rom1": rom1, "rom2": rom2, "clear": clear, "widen": widen}
+               "rom1": rom1, "rom2": rom2, "clear": clear, "widen": widen, "narrow": narrow}
         # Bind after the row exists so the callbacks can find it.
         start_var.trace_add("write", lambda *_, ch=rom.channel: self._refresh_row(ch))
         var.trace_add("write", lambda *_, ch=rom.channel, v=var: self._var_changed(ch, v))
@@ -440,6 +442,7 @@ class RomApp:
             row[key].state(["!disabled"] if enabled else ["disabled"])
         row["clear"].state(["!disabled"] if rom.rom1_us is not None or rom.rom2_us is not None else ["disabled"])
         row["widen"].state(["!disabled"] if rom.can_widen() else ["disabled"])
+        row["narrow"].state(["!disabled"] if not rom.complete and rom.band_half_us > MIN_BAND_HALF_US else ["disabled"])
         position = self.controller.position(channel) if enabled else None
         marks = f"ROM 1 {rom.rom1_us if rom.rom1_us is not None else '-'} / ROM 2 {rom.rom2_us if rom.rom2_us is not None else '-'}"
         where = f"at {position} us" if position is not None else "no output"
@@ -1179,6 +1182,18 @@ class RomApp:
             self._fault_or_say(error)
             return
         self._say(f"ch {channel}: allowed band widened to {low}..{high} us. Move carefully.")
+        self._refresh_row(channel)
+
+    def narrow(self, channel: int) -> None:
+        try:
+            if self.session is not None and self.session.started:
+                low, high = self.session.narrow(channel)
+            else:
+                low, high = self.roms[channel].narrow()
+        except Exception as error:  # noqa: BLE001
+            self._fault_or_say(error)
+            return
+        self._say(f"ch {channel}: allowed band narrowed to {low}..{high} us.")
         self._refresh_row(channel)
 
     def estop(self) -> None:

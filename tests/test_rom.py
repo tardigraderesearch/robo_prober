@@ -335,3 +335,18 @@ def test_manual_heartbeat_mode_releases_when_caller_stops_stepping():
         with pytest.raises(ProtocolError, match="disarmed"):
             session.step(0.01)
         assert device.fault == "watchdog" and device.output(0) is None
+
+
+def test_narrow_shrinks_band_but_never_past_held_position():
+    from robo_prober.rom import MIN_BAND_HALF_US, RomChannel
+
+    rom = RomChannel(channel=3, label="pitch2")
+    low, high = rom.band
+    n_low, n_high = rom.narrow(100)
+    assert n_low == low + 100 and n_high == high - 100
+    for _ in range(20):
+        rom.narrow(100)
+    assert rom.band_half_us == MIN_BAND_HALF_US
+    rom2 = RomChannel(channel=4, label="x")
+    rom2.narrow(1000, keep_inside=rom2.center + 150)
+    assert rom2.band_half_us == 150          # the held position stays inside, so the firmware accepts it

@@ -26,6 +26,8 @@ ABS_MAX_US = 2500
 DEFAULT_START_US = 1500
 DEFAULT_BAND_HALF_US = 300
 WIDEN_STEP_US = 200
+NARROW_STEP_US = 100
+MIN_BAND_HALF_US = 25
 DEFAULT_HOST_SLEW_US_S = 200
 DEFAULT_FIRMWARE_SLEW_US_S = 250
 REQUIRED_CAPS = ("limit", "status", "hb", "token")
@@ -121,6 +123,16 @@ class RomChannel:
             raise RomError("widen step must be positive")
         full = max(self.center - ABS_MIN_US, ABS_MAX_US - self.center)
         self.band_half_us = min(self.band_half_us + step_us, full)
+        return self.band
+
+    def narrow(self, step_us: int = NARROW_STEP_US, keep_inside: int | None = None) -> tuple[int, int]:
+        """Shrink the allowed band around its center; never past a held position."""
+        if self.complete:
+            raise RomError("clear the ROM before narrowing the band")
+        if step_us < 1:
+            raise RomError("narrow step must be positive")
+        floor = MIN_BAND_HALF_US if keep_inside is None else max(MIN_BAND_HALF_US, abs(keep_inside - self.center))
+        self.band_half_us = max(self.band_half_us - step_us, floor)
         return self.band
 
     def set_start(self, pulse_us: int, source: str = "operator") -> None:
@@ -310,6 +322,13 @@ class RomSession:
     def widen(self, channel: int, step_us: int = WIDEN_STEP_US) -> tuple[int, int]:
         rom = self.channels[channel]
         band = rom.widen(step_us)
+        if self.started and self.controller.armed:
+            self._push_band(rom)
+        return band
+
+    def narrow(self, channel: int, step_us: int = NARROW_STEP_US) -> tuple[int, int]:
+        rom = self.channels[channel]
+        band = rom.narrow(step_us, keep_inside=self.controller.position(channel) if channel in self.enabled else None)
         if self.started and self.controller.armed:
             self._push_band(rom)
         return band
