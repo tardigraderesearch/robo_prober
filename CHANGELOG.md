@@ -7,6 +7,11 @@ All notable changes to this project are documented here. The format follows
 ## [Unreleased]
 
 ### Added
+- Servo database: `servo_db` and `data/servos.json` cover 133 hobby and robot
+  servos (96 checked against manufacturer pages, all cited). It provides
+  type-ahead `search()`, `get()`, a conservative `safe_pulse_range()` for the
+  ROM step and a data-driven 20-questions `Identifier`. `to_dtg()` maps an
+  entry to the digital-twin servo-library shape. No GUI yet.
 - Firmware backup and install: on Connect, a board not running the current
   robo-prober firmware (foreign, or older robo-prober without the needed caps)
   gets one confirmation, then its whole flash is backed up to

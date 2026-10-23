@@ -271,6 +271,24 @@ channel's band (no motion, no arming):
 robo-prober rom --map my-robot.map.json --channel 2 --rom1 1720 --rom2 1290 --operator you
 ```
 
+## Servo database
+
+`robo_prober.servo_db` ships a reference table of 133 common hobby and robot
+servos (`data/servos.json`), from SG90s and MG996Rs to Hitec, Savox, Feetech,
+goBILDA, Hiwonder and Dynamixel. Each entry records torque and speed at their
+voltages, the pulse range as the datasheet states it, spline, size, weight and
+its sources. Unknown values are null, and `verified` marks the 96 entries whose
+key numbers came from a manufacturer page. Clones sold under the same name vary
+widely, so treat a spec as a hint. The table is reference data only and never
+drives a pin.
+
+```python
+from robo_prober import servo_db
+servo_db.search("hitec 645")[0]["id"]          # 'hitec-hs-645mg' (also "mg996", "sg 90")
+servo_db.safe_pulse_range("hitec-hs-645mg")    # conservative ROM start band, 1000-2000 if unknown
+servo_db.Identifier().next_question()          # 20-questions: size, wires, gears, label, torque...
+```
+
 ## Python API
 
 robo-prober is also a library. Nothing here moves a servo until you arm.
